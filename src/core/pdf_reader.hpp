@@ -15,10 +15,12 @@ struct PdfPageContent {
 
 struct PdfParseResult {
     bool ok = false;
+    bool isEncrypted = false;
     std::string title;
     int totalPages = 0;
     bool hasRenderedImages = false;
     std::vector<PdfPageContent> pages;
+    std::vector<std::string> outlines;
     std::string errorMessage;
 };
 

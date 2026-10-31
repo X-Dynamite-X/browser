@@ -51,7 +51,7 @@ std::string buildReaderShellHtml(const std::string& badgeText,
                                  const std::string& innerContentHtml) {
     std::string out;
     out.reserve(innerContentHtml.size() + 8192);
-    out += "<!DOCTYPE html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n"
+    out += "<!DOCTYPE html>\n<!-- saved from url=(0014)about:internet -->\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n"
            "<meta charset=\"UTF-8\"/>\n"
            "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"/>\n"
            "<title>" + fs::htmlEscape(docTitle) + " - القارئ المدمج</title>\n"
@@ -193,9 +193,11 @@ DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slo
         PdfParseResult pdf = parsePdfFile(filePathUtf8, 60);
         if (!pdf.ok) {
             out.tabTitle = fileName;
+            std::string sub = pdf.isEncrypted ? "ملف محمي بكلمة مرور" : "تعذّر قراءة ملف PDF";
             out.fullHtml = buildReaderShellHtml(
-                "PDF", "#dc2626", fileName, "تعذّر قراءة ملف PDF",
-                "<div class=\"paper-sheet\"><p dir=\"rtl\">" + fs::htmlEscape(pdf.errorMessage) + "</p></div>");
+                "PDF", "#dc2626", fileName, sub,
+                "<div class=\"paper-sheet\"><h3 dir=\"rtl\" style=\"color:#dc2626;\">تنبيه</h3><p dir=\"rtl\">" +
+                fs::htmlEscape(pdf.errorMessage) + "</p></div>");
         } else {
             out.ok = true;
             out.tabTitle = pdf.title + " (PDF)";
@@ -208,7 +210,18 @@ DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slo
                              " من " + std::to_string(pdf.totalPages) + "</span><span>" +
                              fs::htmlEscape(fileName) + "</span></div>\n";
                 if (!pg.imageFileUrl.empty() || !pg.pngBase64.empty()) {
-                    std::string imgSrc = !pg.imageFileUrl.empty() ? pg.imageFileUrl : ("data:image/png;base64," + pg.pngBase64);
+                    std::string imgSrc = pg.imageFileUrl;
+                    if (imgSrc.empty() && !pg.pngBase64.empty()) {
+                        std::vector<uint8_t> dec = fs::base64Decode(pg.pngBase64);
+                        if (!dec.empty()) {
+                            std::string pPath = fs::joinPath(fs::getTempSessionDir(), "pdf_p" + std::to_string(pg.pageNumber) + ".png");
+                            fs::writeFileBytes(pPath, dec.data(), dec.size());
+                            imgSrc = fs::pathToFileUrl(pPath);
+                        }
+                    }
+                    if (imgSrc.empty()) {
+                        imgSrc = "data:image/png;base64," + pg.pngBase64;
+                    }
                     pagesHtml += "  <div style=\"text-align:center;\"><img class=\"pdf-page-img\" loading=\"lazy\" src=\"" + imgSrc + "\" alt=\"صفحة " + std::to_string(pg.pageNumber) + "\"/></div>\n";
                     if (!fs::trim(pg.textUtf8).empty()) {
                         pagesHtml += "  <details style=\"margin-top:10px;font-size:13px;\"><summary style=\"cursor:pointer;color:#64748b;\">"
@@ -216,8 +229,18 @@ DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slo
                                      formatPlainTextBody(pg.textUtf8) + "</div></details>\n";
                     }
                 } else {
-                    for (const auto& jb : pg.jpegImagesBase64) {
-                        pagesHtml += "  <div class=\"doc-img-box\"><img src=\"data:image/jpeg;base64," + jb + "\"/></div>\n";
+                    for (size_t ji = 0; ji < pg.jpegImagesBase64.size(); ++ji) {
+                        const auto& jb = pg.jpegImagesBase64[ji];
+                        std::vector<uint8_t> dec = fs::base64Decode(jb);
+                        std::string jSrc;
+                        if (!dec.empty()) {
+                            std::string jPath = fs::joinPath(fs::getTempSessionDir(), "pdf_p" + std::to_string(pg.pageNumber) + "_j" + std::to_string(ji) + ".jpg");
+                            fs::writeFileBytes(jPath, dec.data(), dec.size());
+                            jSrc = fs::pathToFileUrl(jPath);
+                        } else {
+                            jSrc = "data:image/jpeg;base64," + jb;
+                        }
+                        pagesHtml += "  <div class=\"doc-img-box\"><img src=\"" + jSrc + "\"/></div>\n";
                     }
                     if (!fs::trim(pg.textUtf8).empty()) {
                         pagesHtml += formatPlainTextBody(pg.textUtf8);

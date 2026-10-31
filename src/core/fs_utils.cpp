@@ -402,6 +402,31 @@ std::string base64Encode(const uint8_t* data, size_t len) {
     return out;
 }
 
+std::vector<uint8_t> base64Decode(const std::string& in) {
+    std::vector<uint8_t> out;
+    out.reserve((in.size() * 3) / 4);
+    uint32_t val = 0;
+    int valb = -8;
+    for (unsigned char c : in) {
+        int d = -1;
+        if (c >= 'A' && c <= 'Z') d = c - 'A';
+        else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') d = c - '0' + 52;
+        else if (c == '+') d = 62;
+        else if (c == '/') d = 63;
+        else if (c == '=') break;
+        if (d != -1) {
+            val = (val << 6) | d;
+            valb += 6;
+            if (valb >= 0) {
+                out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+                valb -= 8;
+            }
+        }
+    }
+    return out;
+}
+
 std::string htmlEscape(const std::string& text) {
     std::string out;
     out.reserve(text.size() + text.size() / 8);

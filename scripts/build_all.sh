@@ -19,6 +19,7 @@ if command -v i686-w64-mingw32-g++-win32 >/dev/null 2>&1; then
     cmake -S "${ROOT_DIR}" -B "${ROOT_DIR}/build-win32-xp" \
         -DCMAKE_SYSTEM_NAME=Windows \
         -DCMAKE_CXX_COMPILER=i686-w64-mingw32-g++-win32 \
+        -DCMAKE_RC_COMPILER=i686-w64-mingw32-windres \
         -DTARGET_WINXP=ON \
         -DBUILD_LITEBROWSER_TESTS=OFF \
         -DCMAKE_BUILD_TYPE=Release
@@ -32,6 +33,7 @@ if command -v x86_64-w64-mingw32-g++-win32 >/dev/null 2>&1; then
     cmake -S "${ROOT_DIR}" -B "${ROOT_DIR}/build-win64" \
         -DCMAKE_SYSTEM_NAME=Windows \
         -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-win32 \
+        -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
         -DBUILD_LITEBROWSER_TESTS=OFF \
         -DCMAKE_BUILD_TYPE=Release
     cmake --build "${ROOT_DIR}/build-win64" -j"$(nproc)"

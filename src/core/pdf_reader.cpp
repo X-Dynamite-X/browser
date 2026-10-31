@@ -469,7 +469,21 @@ bool tryRenderPdfWithPopplerLinux(const std::string& filePathUtf8, int maxVisual
     std::string uri = fs::pathToFileUrl(filePathUtf8);
     void* gerr = nullptr;
     void* doc = docNew(uri.c_str(), nullptr, &gerr);
-    if (!doc) return false;
+    if (!doc) {
+        if (gerr) {
+            struct MiniGError { uint32_t domain; int code; char* message; };
+            auto* ge = reinterpret_cast<MiniGError*>(gerr);
+            if (ge->code == 1) { // POPPLER_ERROR_ENCRYPTED
+                out.isEncrypted = true;
+                out.errorMessage = "هذا المستند محمي بكلمة مرور.";
+            } else if (ge->message) {
+                out.errorMessage = ge->message;
+            }
+            if (gFree && ge->message) gFree(ge->message);
+            if (gFree) gFree(ge);
+        }
+        return false;
+    }
 
     out.title = fs::getFileName(filePathUtf8);
     if (docTitle) {
@@ -555,6 +569,12 @@ PdfParseResult parsePdfPortable(const std::string& filePathUtf8) {
     std::string raw(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     if (raw.find("%PDF-") == std::string::npos) {
         res.errorMessage = "الملف المختار ليس ملف PDF صالحاً.";
+        return res;
+    }
+
+    if (raw.find("/Encrypt") != std::string::npos) {
+        res.isEncrypted = true;
+        res.errorMessage = "هذا المستند محمي بكلمة مرور.";
         return res;
     }
 

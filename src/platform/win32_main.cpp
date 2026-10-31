@@ -40,6 +40,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Windows XP (NT 5.1) compatibility shim for GCC 15 static libgcc gthr-win32 reference to GetThreadId.
@@ -77,21 +78,74 @@ static DWORD WINAPI XpSafeGetThreadId(HANDLE hThread) {
 
 DWORD(WINAPI* pImpGetThreadId)(HANDLE) asm("__imp__GetThreadId@4") = &XpSafeGetThreadId;
 
+struct XpCvWaiterNode {
+    HANDLE event;
+    XpCvWaiterNode* next;
+    XpCvWaiterNode* prev;
+};
+
+struct XpCvImpl {
+    CRITICAL_SECTION cs;
+    XpCvWaiterNode* head;
+    XpCvWaiterNode* tail;
+};
+
+static XpCvImpl* GetOrCreateXpCv(PVOID* cv) {
+    if (!*cv) {
+        auto* newCv = new XpCvImpl();
+        InitializeCriticalSection(&newCv->cs);
+        newCv->head = nullptr;
+        newCv->tail = nullptr;
+        if (InterlockedCompareExchangePointer(cv, newCv, nullptr) != nullptr) {
+            DeleteCriticalSection(&newCv->cs);
+            delete newCv;
+        }
+    }
+    return reinterpret_cast<XpCvImpl*>(*cv);
+}
+
 static VOID WINAPI XpSafeInitializeConditionVariable(PVOID cv) {
     using Fn = VOID(WINAPI*)(PVOID);
     static Fn p = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "InitializeConditionVariable"));
     if (p) { p(cv); return; }
-    if (cv) *reinterpret_cast<HANDLE*>(cv) = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (cv) *reinterpret_cast<PVOID*>(cv) = nullptr;
 }
 
 static BOOL WINAPI XpSafeSleepConditionVariableCS(PVOID cv, PCRITICAL_SECTION cs, DWORD ms) {
     using Fn = BOOL(WINAPI*)(PVOID, PCRITICAL_SECTION, DWORD);
     static Fn p = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "SleepConditionVariableCS"));
     if (p) return p(cv, cs, ms);
-    HANDLE ev = cv ? *reinterpret_cast<HANDLE*>(cv) : nullptr;
-    if (!ev) { ev = CreateEventW(nullptr, FALSE, FALSE, nullptr); if (cv) *reinterpret_cast<HANDLE*>(cv) = ev; }
+    if (!cv) return FALSE;
+
+    XpCvImpl* impl = GetOrCreateXpCv(reinterpret_cast<PVOID*>(cv));
+    if (!impl) return FALSE;
+
+    HANDLE hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!hEvent) return FALSE;
+
+    XpCvWaiterNode node{ hEvent, nullptr, nullptr };
+
+    EnterCriticalSection(&impl->cs);
+    node.prev = impl->tail;
+    node.next = nullptr;
+    if (impl->tail) impl->tail->next = &node;
+    else impl->head = &node;
+    impl->tail = &node;
+    LeaveCriticalSection(&impl->cs);
+
     LeaveCriticalSection(cs);
-    DWORD r = WaitForSingleObject(ev, ms);
+    DWORD r = WaitForSingleObject(hEvent, ms);
+
+    EnterCriticalSection(&impl->cs);
+    if (node.next || node.prev || impl->head == &node) {
+        if (node.prev) node.prev->next = node.next;
+        else impl->head = node.next;
+        if (node.next) node.next->prev = node.prev;
+        else impl->tail = node.prev;
+    }
+    LeaveCriticalSection(&impl->cs);
+
+    CloseHandle(hEvent);
     EnterCriticalSection(cs);
     return (r == WAIT_OBJECT_0);
 }
@@ -100,14 +154,53 @@ static VOID WINAPI XpSafeWakeConditionVariable(PVOID cv) {
     using Fn = VOID(WINAPI*)(PVOID);
     static Fn p = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "WakeConditionVariable"));
     if (p) { p(cv); return; }
-    if (cv && *reinterpret_cast<HANDLE*>(cv)) SetEvent(*reinterpret_cast<HANDLE*>(cv));
+    if (!cv || !*reinterpret_cast<PVOID*>(cv)) return;
+
+    XpCvImpl* impl = reinterpret_cast<XpCvImpl*>(*reinterpret_cast<PVOID*>(cv));
+    HANDLE toSignal = nullptr;
+
+    EnterCriticalSection(&impl->cs);
+    if (impl->head) {
+        XpCvWaiterNode* first = impl->head;
+        toSignal = first->event;
+        impl->head = first->next;
+        if (impl->head) impl->head->prev = nullptr;
+        else impl->tail = nullptr;
+        first->next = nullptr;
+        first->prev = nullptr;
+    }
+    LeaveCriticalSection(&impl->cs);
+
+    if (toSignal) SetEvent(toSignal);
 }
 
 static VOID WINAPI XpSafeWakeAllConditionVariable(PVOID cv) {
     using Fn = VOID(WINAPI*)(PVOID);
     static Fn p = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "WakeAllConditionVariable"));
     if (p) { p(cv); return; }
-    if (cv && *reinterpret_cast<HANDLE*>(cv)) SetEvent(*reinterpret_cast<HANDLE*>(cv));
+    if (!cv || !*reinterpret_cast<PVOID*>(cv)) return;
+
+    XpCvImpl* impl = reinterpret_cast<XpCvImpl*>(*reinterpret_cast<PVOID*>(cv));
+    HANDLE eventsToSignal[64];
+    int count = 0;
+
+    EnterCriticalSection(&impl->cs);
+    XpCvWaiterNode* curr = impl->head;
+    while (curr && count < 64) {
+        eventsToSignal[count++] = curr->event;
+        XpCvWaiterNode* next = curr->next;
+        curr->next = nullptr;
+        curr->prev = nullptr;
+        curr = next;
+    }
+    impl->head = curr;
+    if (impl->head) impl->head->prev = nullptr;
+    else impl->tail = nullptr;
+    LeaveCriticalSection(&impl->cs);
+
+    for (int i = 0; i < count; ++i) {
+        SetEvent(eventsToSignal[i]);
+    }
 }
 
 VOID(WINAPI* pImpInitCV)(PVOID) asm("__imp__InitializeConditionVariable@4") = &XpSafeInitializeConditionVariable;
@@ -120,6 +213,13 @@ VOID(WINAPI* pImpWakeAllCV)(PVOID) asm("__imp__WakeAllConditionVariable@4") = &X
 namespace {
 
 constexpr UINT WM_DOWNLOAD_STATUS = WM_APP + 10;
+constexpr UINT WM_DOC_LOADED = WM_APP + 42;
+
+struct AsyncDocResult {
+    int tabId = 0;
+    std::string path;
+    litebrowser::DocumentViewOutput doc;
+};
 
 enum ControlIds {
     ID_BTN_BACK = 1001,
@@ -156,6 +256,9 @@ enum ControlIds {
     ID_ACCEL_RELOAD,
     ID_ACCEL_FULLSCREEN,
     ID_ACCEL_ESCAPE,
+    ID_ACCEL_ZOOM_IN,
+    ID_ACCEL_ZOOM_OUT,
+    ID_ACCEL_ZOOM_RESET,
 
     // Dynamic Bookmarks Base
     ID_BM_BASE = 3000
@@ -165,11 +268,13 @@ enum ControlIds {
 struct MiniblinkApi {
     HMODULE dll = nullptr;
     using wkeWebView = void*;
+    using wkeString = void*;
 
-    typedef bool (*wkeNavigationCallback)(wkeWebView webView, void* param, int navigationType, const wchar_t* url);
-    typedef void (*wkeTitleChangedCallback)(wkeWebView webView, void* param, const wchar_t* title);
-    typedef void (*wkeURLChangedCallback)(wkeWebView webView, void* param, const wchar_t* url);
-    typedef wkeWebView (*wkeCreateViewCallback)(wkeWebView webView, void* param, int navigationType, const wchar_t* url, const void* windowFeatures);
+    typedef bool (*wkeNavigationCallback)(wkeWebView webView, void* param, int navigationType, const wkeString url);
+    typedef void (*wkeTitleChangedCallback)(wkeWebView webView, void* param, const wkeString title);
+    typedef void (*wkeURLChangedCallback)(wkeWebView webView, void* param, const wkeString url);
+    typedef wkeWebView (*wkeCreateViewCallback)(wkeWebView webView, void* param, int navigationType, const wkeString url, const void* windowFeatures);
+    typedef bool (*wkeDownloadCallback)(wkeWebView webView, void* param, const char* url);
 
     void (*wkeInitialize)(void) = nullptr;
     wkeWebView (*wkeCreateWebWindow)(int type, HWND parent, int x, int y, int width, int height) = nullptr;
@@ -184,10 +289,16 @@ struct MiniblinkApi {
     bool (*wkeGoForward)(wkeWebView webView) = nullptr;
     void (*wkeReload)(wkeWebView webView) = nullptr;
 
+    const wchar_t* (*wkeGetStringW)(wkeString str) = nullptr;
+    const char* (*wkeGetString)(wkeString str) = nullptr;
+    void (*wkeSetZoomFactor)(wkeWebView webView, float factor) = nullptr;
+    float (*wkeGetZoomFactor)(wkeWebView webView) = nullptr;
+
     void (*wkeOnNavigation)(wkeWebView webView, wkeNavigationCallback callback, void* callbackParam) = nullptr;
     void (*wkeOnTitleChanged)(wkeWebView webView, wkeTitleChangedCallback callback, void* callbackParam) = nullptr;
     void (*wkeOnURLChanged)(wkeWebView webView, wkeURLChangedCallback callback, void* callbackParam) = nullptr;
     void (*wkeOnCreateView)(wkeWebView webView, wkeCreateViewCallback callback, void* callbackParam) = nullptr;
+    void (*wkeOnDownload)(wkeWebView webView, wkeDownloadCallback callback, void* callbackParam) = nullptr;
     bool (*wkeFindText)(wkeWebView webView, const wchar_t* text, bool forward, bool matchCase) = nullptr;
 
     bool tryLoad() {
@@ -210,10 +321,15 @@ struct MiniblinkApi {
         BIND_WKE(wkeCanGoForward);
         BIND_WKE(wkeGoForward);
         BIND_WKE(wkeReload);
+        BIND_WKE(wkeGetStringW);
+        BIND_WKE(wkeGetString);
+        BIND_WKE(wkeSetZoomFactor);
+        BIND_WKE(wkeGetZoomFactor);
         BIND_WKE(wkeOnNavigation);
         BIND_WKE(wkeOnTitleChanged);
         BIND_WKE(wkeOnURLChanged);
         BIND_WKE(wkeOnCreateView);
+        BIND_WKE(wkeOnDownload);
         BIND_WKE(wkeFindText);
 #undef BIND_WKE
         if (wkeInitialize && wkeCreateWebWindow && wkeLoadURLW && wkeMoveWindow && wkeShowWindow) {
@@ -444,6 +560,7 @@ struct WinTab {
     std::string activeTempUrl;
     std::string title = "الرئيسية";
     bool isPrivate = false;
+    float zoomFactor = 1.0f;
 };
 
 struct WinBrowserApp {
@@ -515,8 +632,9 @@ void layoutWinChildren();
 void refreshWinBookmarksBar();
 void showWinFindBar(bool show);
 void doWinFind(bool forward);
+void startWinDownload(const std::string& rawUrl, bool openInReaderWhenDone = false);
 
-void startWinDownload(const std::string& rawUrl) {
+void startWinDownload(const std::string& rawUrl, bool openInReaderWhenDone) {
     if (!g_app || rawUrl.empty()) return;
     std::string url = rawUrl;
     if (!litebrowser::fs::startsWithIgnoreCase(url, "http://") &&
@@ -528,7 +646,7 @@ void startWinDownload(const std::string& rawUrl) {
     std::string savePath = makeUniqueWinDownloadPath(fname);
 
     int id = litebrowser::DownloaderPool::instance().startDownload(
-        g_app->storage, url, savePath, false, [](const litebrowser::DownloadProgressInfo& p) {
+        g_app->storage, url, savePath, openInReaderWhenDone, [](const litebrowser::DownloadProgressInfo& p) {
             if (p.status == litebrowser::DownloadStatus::Completed && g_app && g_app->mainWnd) {
                 PostMessageW(g_app->mainWnd, WM_DOWNLOAD_STATUS, 1, p.id);
             } else if (p.status == litebrowser::DownloadStatus::Failed && g_app && g_app->mainWnd) {
@@ -539,6 +657,27 @@ void startWinDownload(const std::string& rawUrl) {
     if (id > 0) {
         setWinStatus("بدأ التحميل في الخلفية: " + savePath);
     }
+}
+
+void applyWinTabZoom(WinTab* tab, float factor) {
+    if (!tab) return;
+    tab->zoomFactor = (factor < 0.3f) ? 0.3f : ((factor > 3.0f) ? 3.0f : factor);
+    if (tab->mbView && g_mb.wkeSetZoomFactor) {
+        g_mb.wkeSetZoomFactor(tab->mbView, tab->zoomFactor);
+    } else if (tab->oleSite && tab->oleSite->webBrowser) {
+        static const GUID CGID_MSHTML_LOCAL = {0xDE4BA900, 0x59CA, 0x11CF, {0x95, 0x92, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+        IOleCommandTarget* pCmdTarget = nullptr;
+        if (SUCCEEDED(tab->oleSite->webBrowser->QueryInterface(IID_IOleCommandTarget, reinterpret_cast<void**>(&pCmdTarget)))) {
+            VARIANT vIn;
+            VariantInit(&vIn);
+            vIn.vt = VT_I4;
+            vIn.lVal = static_cast<LONG>(tab->zoomFactor * 100.0f);
+            pCmdTarget->Exec(&CGID_MSHTML_LOCAL, 63 /* OLECMDID_OPTICAL_ZOOM */, OLECMDEXECOPT_DONTPROMPTUSER, &vIn, nullptr);
+            pCmdTarget->Release();
+        }
+    }
+    int pct = static_cast<int>(tab->zoomFactor * 100.0f);
+    setWinStatus("نسبة التكبير: " + std::to_string(pct) + "%");
 }
 
 void updateTabHeaderText(int index, const std::string& utf8Title) {
@@ -680,12 +819,25 @@ STDMETHODIMP OleBrowserSite::Invoke(DISPID dispIdMember, REFIID, LCID, WORD, DIS
                 if (pCancel) *pCancel = VARIANT_TRUE;
                 return S_OK;
             }
+            if (litebrowser::isRemoteDocumentUrl(url)) {
+                if (pCancel) *pCancel = VARIANT_TRUE;
+                startWinDownload(url, true);
+                navigateWinTab(ownerTab, "lite://downloads");
+                return S_OK;
+            }
             if (litebrowser::isDirectDownloadExtension(url) &&
                 (litebrowser::fs::startsWithIgnoreCase(url, "http://") || litebrowser::fs::startsWithIgnoreCase(url, "https://"))) {
                 if (pCancel) *pCancel = VARIANT_TRUE;
                 startWinDownload(url);
                 navigateWinTab(ownerTab, "lite://downloads");
                 return S_OK;
+            }
+        }
+    } else if ((dispIdMember == 251 /* DISPID_NEWWINDOW2 */ || dispIdMember == 273 /* DISPID_NEWWINDOW3 */) && pDispParams->cArgs >= 1) {
+        VARIANT* vCancel = &pDispParams->rgvarg[0];
+        if (g_app->storage.getSettings().adBlockEnabled) {
+            if (vCancel->vt == (VT_BOOL | VT_BYREF) && vCancel->pboolVal) {
+                *vCancel->pboolVal = VARIANT_TRUE; // Block popup window
             }
         }
     } else if (dispIdMember == DISPID_TITLECHANGE && pDispParams->cArgs >= 1) {
@@ -721,9 +873,11 @@ STDMETHODIMP OleBrowserSite::Invoke(DISPID dispIdMember, REFIID, LCID, WORD, DIS
 }
 
 // Miniblink navigation callback
-bool mbNavigationCallback(MiniblinkApi::wkeWebView webView, void* param, int, const wchar_t* urlW) {
+bool mbNavigationCallback(MiniblinkApi::wkeWebView webView, void* param, int, MiniblinkApi::wkeString urlStr) {
     auto* tab = static_cast<WinTab*>(param);
-    if (!tab || !g_app || !urlW) return true;
+    if (!tab || !g_app || !urlStr) return true;
+    const wchar_t* urlW = g_mb.wkeGetStringW ? g_mb.wkeGetStringW(urlStr) : nullptr;
+    if (!urlW) return true;
     std::string url = litebrowser::fs::wideToUtf8(urlW);
 
     if (litebrowser::fs::startsWithIgnoreCase(url, "lite-action://")) {
@@ -737,6 +891,11 @@ bool mbNavigationCallback(MiniblinkApi::wkeWebView webView, void* param, int, co
     if (g_app->storage.getSettings().adBlockEnabled && litebrowser::shouldBlockAdOrTracker(url)) {
         return false;
     }
+    if (litebrowser::isRemoteDocumentUrl(url)) {
+        startWinDownload(url, true);
+        navigateWinTab(tab, "lite://downloads");
+        return false;
+    }
     if (litebrowser::isDirectDownloadExtension(url) &&
         (litebrowser::fs::startsWithIgnoreCase(url, "http://") || litebrowser::fs::startsWithIgnoreCase(url, "https://"))) {
         startWinDownload(url);
@@ -746,9 +905,11 @@ bool mbNavigationCallback(MiniblinkApi::wkeWebView webView, void* param, int, co
     return true;
 }
 
-void mbTitleChangedCallback(MiniblinkApi::wkeWebView, void* param, const wchar_t* titleW) {
+void mbTitleChangedCallback(MiniblinkApi::wkeWebView, void* param, MiniblinkApi::wkeString titleStr) {
     auto* tab = static_cast<WinTab*>(param);
-    if (!tab || !g_app || !titleW) return;
+    if (!tab || !g_app || !titleStr) return;
+    const wchar_t* titleW = g_mb.wkeGetStringW ? g_mb.wkeGetStringW(titleStr) : nullptr;
+    if (!titleW) return;
     tab->title = litebrowser::fs::wideToUtf8(titleW);
     std::string disp = tab->isPrivate ? ("[سري] " + tab->title) : tab->title;
     for (size_t i = 0; i < g_app->tabs.size(); ++i) {
@@ -759,9 +920,11 @@ void mbTitleChangedCallback(MiniblinkApi::wkeWebView, void* param, const wchar_t
     }
 }
 
-void mbURLChangedCallback(MiniblinkApi::wkeWebView, void* param, const wchar_t* urlW) {
+void mbURLChangedCallback(MiniblinkApi::wkeWebView, void* param, MiniblinkApi::wkeString urlStr) {
     auto* tab = static_cast<WinTab*>(param);
-    if (!tab || !g_app || !urlW) return;
+    if (!tab || !g_app || !urlStr) return;
+    const wchar_t* urlW = g_mb.wkeGetStringW ? g_mb.wkeGetStringW(urlStr) : nullptr;
+    if (!urlW) return;
     std::string u = litebrowser::fs::wideToUtf8(urlW);
     if (u.find("litebrowser_session_") == std::string::npos) {
         tab->logicalUrl = u;
@@ -775,11 +938,21 @@ void mbURLChangedCallback(MiniblinkApi::wkeWebView, void* param, const wchar_t* 
     }
 }
 
-MiniblinkApi::wkeWebView mbCreateViewCallback(MiniblinkApi::wkeWebView, void*, int, const wchar_t* urlW, const void*) {
-    if (!g_app) return nullptr;
+MiniblinkApi::wkeWebView mbCreateViewCallback(MiniblinkApi::wkeWebView, void*, int, MiniblinkApi::wkeString urlStr, const void*) {
+    if (!g_app || !urlStr) return nullptr;
+    const wchar_t* urlW = g_mb.wkeGetStringW ? g_mb.wkeGetStringW(urlStr) : nullptr;
     std::string url = (urlW && *urlW) ? litebrowser::fs::wideToUtf8(urlW) : "lite://home";
     WinTab* t = createWinTab(url, true);
     return t ? t->mbView : nullptr;
+}
+
+bool mbDownloadCallback(MiniblinkApi::wkeWebView, void*, const char* url) {
+    if (!url || !g_app) return false;
+    startWinDownload(url);
+    if (g_app->currentTab()) {
+        navigateWinTab(g_app->currentTab(), "lite://downloads");
+    }
+    return false;
 }
 
 void loadUrlIntoTabEngine(WinTab* tab, const std::string& urlUtf8) {
@@ -793,6 +966,13 @@ void loadUrlIntoTabEngine(WinTab* tab, const std::string& urlUtf8) {
 
 void navigateWinTab(WinTab* tab, const std::string& rawInput) {
     if (!tab || !g_app) return;
+    if (litebrowser::isRemoteDocumentUrl(rawInput)) {
+        startWinDownload(rawInput, true);
+        setWinStatus("جاري تنزيل المستند لفتحه في القارئ المدمج...");
+        navigateWinTab(tab, "lite://downloads");
+        return;
+    }
+
     auto settings = g_app->storage.getSettings();
     auto resolved = litebrowser::resolveOmniboxInput(rawInput, settings.liteMode, settings.searchEngine);
 
@@ -810,14 +990,23 @@ void navigateWinTab(WinTab* tab, const std::string& rawInput) {
         updateTabHeaderText(tabIdx, disp);
         loadUrlIntoTabEngine(tab, page.tempFileUrl);
     } else if (resolved.type == litebrowser::OmniboxActionType::OpenLocalDocument) {
-        setWinStatus("جاري فتح المستند...");
-        auto doc = litebrowser::renderDocumentToHtml(resolved.targetUrlOrPath, tab->tabId);
         tab->logicalUrl = resolved.targetUrlOrPath;
-        tab->activeTempUrl = doc.tempFileUrl;
-        tab->title = doc.tabTitle;
-        std::string disp = tab->isPrivate ? ("[سري] " + doc.tabTitle) : doc.tabTitle;
+        tab->title = "جاري قراءة " + litebrowser::fs::getFileName(resolved.targetUrlOrPath) + "...";
+        std::string disp = tab->isPrivate ? ("[سري] " + tab->title) : tab->title;
         updateTabHeaderText(tabIdx, disp);
-        loadUrlIntoTabEngine(tab, doc.tempFileUrl);
+        setWinStatus("جاري معالجة المستند وقراءته في الخلفية...");
+
+        int targetTabId = tab->tabId;
+        std::string path = resolved.targetUrlOrPath;
+        std::thread([targetTabId, path]() {
+            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId);
+            auto* res = new AsyncDocResult{ targetTabId, path, std::move(doc) };
+            if (g_app && g_app->mainWnd) {
+                PostMessageW(g_app->mainWnd, WM_DOC_LOADED, 0, reinterpret_cast<LPARAM>(res));
+            } else {
+                delete res;
+            }
+        }).detach();
     } else {
         tab->logicalUrl = resolved.targetUrlOrPath;
         tab->activeTempUrl.clear();
@@ -836,6 +1025,9 @@ void switchActiveWinTab(int index) {
     }
     layoutWinChildren();
     syncWinToolbar();
+    if (g_app->storage.getSettings().liteMode) {
+        trimProcessWorkingSet();
+    }
 }
 
 WinTab* createWinTab(const std::string& initialUrl, bool activate, bool isPrivate) {
@@ -856,6 +1048,7 @@ WinTab* createWinTab(const std::string& initialUrl, bool activate, bool isPrivat
             if (g_mb.wkeOnTitleChanged) g_mb.wkeOnTitleChanged(tab->mbView, mbTitleChangedCallback, tab.get());
             if (g_mb.wkeOnURLChanged) g_mb.wkeOnURLChanged(tab->mbView, mbURLChangedCallback, tab.get());
             if (g_mb.wkeOnCreateView) g_mb.wkeOnCreateView(tab->mbView, mbCreateViewCallback, tab.get());
+            if (g_mb.wkeOnDownload) g_mb.wkeOnDownload(tab->mbView, mbDownloadCallback, tab.get());
         }
     } else {
         tab->oleSite = std::make_unique<OleBrowserSite>(tab.get(), tab->hostPanel);
@@ -1115,11 +1308,39 @@ LRESULT CALLBACK mainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == 1) {
                 auto rec = g_app->storage.getDownloadById(static_cast<int>(lp));
                 setWinStatus("اكتمل التحميل بنجاح: " + rec.fileName);
+                if (rec.openInReaderWhenDone) {
+                    createWinTab(rec.savePath, true);
+                }
             } else {
                 setWinStatus("انتهت عملية التحميل بتعذّر الوصول إلى الملف.");
             }
             if (WinTab* t = g_app->currentTab()) {
                 if (t->logicalUrl == "lite://downloads") navigateWinTab(t, "lite://downloads");
+            }
+            return 0;
+        }
+
+        case WM_DOC_LOADED: {
+            auto* res = reinterpret_cast<AsyncDocResult*>(lp);
+            if (res) {
+                if (g_app) {
+                    for (size_t i = 0; i < g_app->tabs.size(); ++i) {
+                        if (g_app->tabs[i]->tabId == res->tabId) {
+                            WinTab* t = g_app->tabs[i].get();
+                            t->activeTempUrl = res->doc.tempFileUrl;
+                            t->title = res->doc.tabTitle;
+                            std::string disp = t->isPrivate ? ("[سري] " + t->title) : t->title;
+                            updateTabHeaderText(static_cast<int>(i), disp);
+                            loadUrlIntoTabEngine(t, res->doc.tempFileUrl);
+                            if (t == g_app->currentTab()) {
+                                syncWinToolbar();
+                                setWinStatus("تم فتح المستند بنجاح: " + res->doc.tabTitle);
+                            }
+                            break;
+                        }
+                    }
+                }
+                delete res;
             }
             return 0;
         }
@@ -1243,6 +1464,15 @@ LRESULT CALLBACK mainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case ID_FIND_CLOSE:
                     showWinFindBar(false);
                     break;
+                case ID_ACCEL_ZOOM_IN:
+                    if (cur) applyWinTabZoom(cur, cur->zoomFactor + 0.1f);
+                    break;
+                case ID_ACCEL_ZOOM_OUT:
+                    if (cur) applyWinTabZoom(cur, cur->zoomFactor - 0.1f);
+                    break;
+                case ID_ACCEL_ZOOM_RESET:
+                    if (cur) applyWinTabZoom(cur, 1.0f);
+                    break;
                 case ID_ACCEL_FULLSCREEN: {
                     static bool isFull = false;
                     static RECT prevRc;
@@ -1333,7 +1563,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wc.lpfnWndProc = mainWndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIconSm = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"LiteBrowserWinClass";
     RegisterClassExW(&wc);
@@ -1434,7 +1666,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         { FCONTROL | FVIRTKEY, 'O', ID_ACCEL_OPENDOC },
         { FCONTROL | FVIRTKEY, 'L', ID_ACCEL_FOCUSURL },
         { FCONTROL | FVIRTKEY, 'F', ID_ACCEL_FIND },
+        { FCONTROL | FVIRTKEY, 'R', ID_ACCEL_RELOAD },
         { FVIRTKEY, VK_F5, ID_ACCEL_RELOAD },
+        { FCONTROL | FVIRTKEY, VK_OEM_PLUS, ID_ACCEL_ZOOM_IN },
+        { FCONTROL | FVIRTKEY, VK_ADD, ID_ACCEL_ZOOM_IN },
+        { FCONTROL | FVIRTKEY, VK_OEM_MINUS, ID_ACCEL_ZOOM_OUT },
+        { FCONTROL | FVIRTKEY, VK_SUBTRACT, ID_ACCEL_ZOOM_OUT },
+        { FCONTROL | FVIRTKEY, '0', ID_ACCEL_ZOOM_RESET },
+        { FCONTROL | FVIRTKEY, VK_NUMPAD0, ID_ACCEL_ZOOM_RESET },
         { FVIRTKEY, VK_F11, ID_ACCEL_FULLSCREEN },
         { FVIRTKEY, VK_ESCAPE, ID_ACCEL_ESCAPE }
     };

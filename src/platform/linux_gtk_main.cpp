@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -169,6 +170,7 @@ struct TabContext {
     GtkWidget* tabLabel = nullptr;
     std::string logicalUrl = "lite://home";
     std::string activeTempUrl;
+    std::string title = "الرئيسية";
     bool isPrivate = false;
 };
 
@@ -384,6 +386,33 @@ void refreshBookmarksBar(BrowserApp* app) {
     }
 }
 
+void startLinuxDownload(BrowserApp* app, const std::string& rawUrl, bool openInReaderWhenDone = false) {
+    if (!app || rawUrl.empty()) return;
+    std::string dlUrl = rawUrl;
+    if (!litebrowser::fs::startsWithIgnoreCase(dlUrl, "http://") &&
+        !litebrowser::fs::startsWithIgnoreCase(dlUrl, "https://")) {
+        dlUrl = "https://" + dlUrl;
+    }
+    litebrowser::DownloaderPool::instance().startDownload(
+        app->storage, dlUrl, "", openInReaderWhenDone, [app, openInReaderWhenDone](const litebrowser::DownloadProgressInfo& p) {
+            if (p.status == litebrowser::DownloadStatus::Completed) {
+                struct DoneData { BrowserApp* app; int id; bool openReader; };
+                auto* d = new DoneData{ app, p.id, openInReaderWhenDone };
+                g_idle_add([](gpointer user) -> gboolean {
+                    auto* dd = static_cast<DoneData*>(user);
+                    auto rec = dd->app->storage.getDownloadById(dd->id);
+                    setStatus(dd->app, "اكتمل التحميل بنجاح: " + rec.fileName);
+                    if (rec.openInReaderWhenDone) {
+                        createNewTab(dd->app, rec.savePath, true);
+                    }
+                    delete dd;
+                    return FALSE;
+                }, d);
+            }
+        });
+    setStatus(app, "بدأ التحميل في الخلفية: " + dlUrl);
+}
+
 void handleLiteAction(TabContext* tab, const std::string& actionUri) {
     BrowserApp* app = tab->app;
     std::string rest = actionUri.substr(std::strlen("lite-action://"));
@@ -408,23 +437,7 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
         std::string encoded = rest.substr(std::strlen("download?url="));
         std::string dlUrl = litebrowser::fs::urlDecode(encoded);
         if (!dlUrl.empty()) {
-            if (!litebrowser::fs::startsWithIgnoreCase(dlUrl, "http://") &&
-                !litebrowser::fs::startsWithIgnoreCase(dlUrl, "https://")) {
-                dlUrl = "https://" + dlUrl;
-            }
-            // Start through DownloaderPool for complete pause/resume capability
-            int dlId = litebrowser::DownloaderPool::instance().startDownload(
-                app->storage, dlUrl, "", false, [app](const litebrowser::DownloadProgressInfo& p) {
-                    if (p.status == litebrowser::DownloadStatus::Completed) {
-                        setStatus(app, "اكتمل التحميل بنجاح!");
-                    }
-                });
-            if (dlId > 0) {
-                setStatus(app, "بدأ التحميل في الخلفية: " + dlUrl);
-            } else if (g_wk.web_context_download_uri) {
-                g_wk.web_context_download_uri(g_wk.web_context_get_default(), dlUrl.c_str());
-                setStatus(app, "بدأ التحميل عبر المتصفح: " + dlUrl);
-            }
+            startLinuxDownload(app, dlUrl);
             navigateTab(tab, "lite://downloads");
         }
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "pause-download?id=")) {
@@ -495,6 +508,14 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
 void navigateTab(TabContext* tab, const std::string& rawInput) {
     if (!tab) return;
     BrowserApp* app = tab->app;
+
+    if (litebrowser::isRemoteDocumentUrl(rawInput)) {
+        startLinuxDownload(app, rawInput, true);
+        setStatus(app, "جاري تنزيل المستند لفتحه في القارئ المدمج...");
+        navigateTab(tab, "lite://downloads");
+        return;
+    }
+
     auto settings = app->storage.getSettings();
     auto resolved = litebrowser::resolveOmniboxInput(rawInput, settings.liteMode, settings.searchEngine);
 
@@ -507,14 +528,40 @@ void navigateTab(TabContext* tab, const std::string& rawInput) {
         updateToolbarForTab(app, tab);
         setStatus(app, page.title);
     } else if (resolved.type == litebrowser::OmniboxActionType::OpenLocalDocument) {
-        setStatus(app, "جاري تجهيز المستند للقراءة...");
-        auto doc = litebrowser::renderDocumentToHtml(resolved.targetUrlOrPath, tab->tabId);
+        std::string fname = litebrowser::fs::getFileName(resolved.targetUrlOrPath);
         tab->logicalUrl = resolved.targetUrlOrPath;
-        tab->activeTempUrl = doc.tempFileUrl;
-        gtk_label_set_text(GTK_LABEL(tab->tabLabel), tab->isPrivate ? ("[سري] " + doc.tabTitle).c_str() : doc.tabTitle.c_str());
-        g_wk.web_view_load_uri(tab->webView, doc.tempFileUrl.c_str());
-        updateToolbarForTab(app, tab);
-        setStatus(app, "تم فتح المستند: " + doc.tabTitle);
+        tab->title = "جاري قراءة " + fname + "...";
+        gtk_label_set_text(GTK_LABEL(tab->tabLabel), tab->isPrivate ? ("[سري] " + tab->title).c_str() : tab->title.c_str());
+        setStatus(app, "جاري معالجة وقراءة المستند في الخلفية...");
+
+        struct AsyncDocData {
+            BrowserApp* app;
+            int tabId;
+            litebrowser::DocumentViewOutput doc;
+        };
+
+        int targetTabId = tab->tabId;
+        std::string path = resolved.targetUrlOrPath;
+        std::thread([app, targetTabId, path]() {
+            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId);
+            auto* data = new AsyncDocData{ app, targetTabId, std::move(doc) };
+            g_idle_add([](gpointer user) -> gboolean {
+                auto* d = static_cast<AsyncDocData*>(user);
+                for (auto& t : d->app->tabs) {
+                    if (t->tabId == d->tabId) {
+                        t->activeTempUrl = d->doc.tempFileUrl;
+                        t->title = d->doc.tabTitle;
+                        gtk_label_set_text(GTK_LABEL(t->tabLabel), t->isPrivate ? ("[سري] " + t->title).c_str() : t->title.c_str());
+                        g_wk.web_view_load_uri(t->webView, d->doc.tempFileUrl.c_str());
+                        updateToolbarForTab(d->app, t.get());
+                        setStatus(d->app, "تم فتح المستند: " + d->doc.tabTitle);
+                        break;
+                    }
+                }
+                delete d;
+                return FALSE;
+            }, data);
+        }).detach();
     } else {
         tab->logicalUrl = resolved.targetUrlOrPath;
         tab->activeTempUrl.clear();

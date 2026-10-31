@@ -27,7 +27,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-    add_executable(litebrowser WIN32 src/platform/win32_main.cpp)
+    enable_language(RC)
+    add_executable(litebrowser WIN32 src/platform/win32_main.cpp src/platform/resources.rc)
     target_link_libraries(litebrowser PRIVATE
         litebrowser_core
         comctl32
