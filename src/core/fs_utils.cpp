@@ -223,7 +223,28 @@ std::string joinPath(const std::string& dir, const std::string& name) {
 }
 
 std::string pathToFileUrl(const std::string& pathUtf8) {
-    std::string p = pathUtf8;
+    if (pathUtf8.empty()) return "file:///";
+    std::string absPath = pathUtf8;
+#ifdef _WIN32
+    std::wstring w = utf8ToWide(pathUtf8);
+    wchar_t full[MAX_PATH] = {0};
+    if (GetFullPathNameW(w.c_str(), MAX_PATH, full, nullptr) > 0) {
+        absPath = wideToUtf8(full);
+    }
+#else
+    if (pathUtf8[0] != '/') {
+        char full[4096] = {0};
+        if (realpath(pathUtf8.c_str(), full)) {
+            absPath = full;
+        } else {
+            char cwd[4096] = {0};
+            if (getcwd(cwd, sizeof(cwd))) {
+                absPath = std::string(cwd) + "/" + pathUtf8;
+            }
+        }
+    }
+#endif
+    std::string p = absPath;
     std::replace(p.begin(), p.end(), '\\', '/');
     std::string encoded;
     for (unsigned char c : p) {

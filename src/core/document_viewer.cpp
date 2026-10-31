@@ -107,6 +107,8 @@ std::string buildReaderShellHtml(const std::string& badgeText,
            "    <input id=\"qBox\" class=\"search-inp\" type=\"text\" placeholder=\"بحث داخل المستند...\" onkeyup=\"onSearchKey(event)\"/>\n"
            "    <button class=\"rbtn\" onclick=\"findInDoc()\">بحث</button>\n"
            "    <span id=\"qStat\" class=\"doc-meta\"></span>\n"
+           "    <input id=\"jumpInp\" class=\"search-inp\" style=\"width:54px;\" type=\"number\" min=\"1\" placeholder=\"ص...\" onchange=\"jumpToPage(this.value)\" title=\"انتقال إلى صفحة\"/>\n"
+           "    <button class=\"rbtn\" onclick=\"rotatePages()\" title=\"تدوير الصفحات 90 درجة\">تدوير ↻</button>\n"
            "    <button class=\"rbtn\" onclick=\"zoomStep(10)\" title=\"تكبير\">تكبير +</button>\n"
            "    <button class=\"rbtn\" onclick=\"zoomStep(-10)\" title=\"تصغير\">تصغير -</button>\n"
            "    <span id=\"zLabel\" class=\"doc-meta\">100%</span>\n"
@@ -121,6 +123,18 @@ std::string buildReaderShellHtml(const std::string& badgeText,
            "</div>\n"
            "<script>\n"
            "var curZoom = 100;\n"
+           "var curRot = 0;\n"
+           "function rotatePages() {\n"
+           "  curRot = (curRot + 90) % 360;\n"
+           "  var imgs = document.getElementsByClassName('pdf-page-img');\n"
+           "  for (var i = 0; i < imgs.length; i++) {\n"
+           "    imgs[i].style.transform = 'rotate(' + curRot + 'deg)';\n"
+           "  }\n"
+           "}\n"
+           "function jumpToPage(num) {\n"
+           "  var el = document.getElementById('page-' + num);\n"
+           "  if (el) el.scrollIntoView(true);\n"
+           "}\n"
            "function zoomStep(delta) {\n"
            "  curZoom = Math.max(60, Math.min(220, curZoom + delta));\n"
            "  var st = document.getElementById('docStage');\n"
@@ -193,9 +207,9 @@ DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slo
                 pagesHtml += "  <div class=\"pdf-page-header\"><span>صفحة " + std::to_string(pg.pageNumber) +
                              " من " + std::to_string(pdf.totalPages) + "</span><span>" +
                              fs::htmlEscape(fileName) + "</span></div>\n";
-                if (!pg.pngBase64.empty()) {
-                    pagesHtml += "  <div style=\"text-align:center;\"><img class=\"pdf-page-img\" src=\"data:image/png;base64," +
-                                 pg.pngBase64 + "\" alt=\"صفحة " + std::to_string(pg.pageNumber) + "\"/></div>\n";
+                if (!pg.imageFileUrl.empty() || !pg.pngBase64.empty()) {
+                    std::string imgSrc = !pg.imageFileUrl.empty() ? pg.imageFileUrl : ("data:image/png;base64," + pg.pngBase64);
+                    pagesHtml += "  <div style=\"text-align:center;\"><img class=\"pdf-page-img\" loading=\"lazy\" src=\"" + imgSrc + "\" alt=\"صفحة " + std::to_string(pg.pageNumber) + "\"/></div>\n";
                     if (!fs::trim(pg.textUtf8).empty()) {
                         pagesHtml += "  <details style=\"margin-top:10px;font-size:13px;\"><summary style=\"cursor:pointer;color:#64748b;\">"
                                      "عرض النص المستخرج للنسخ والبحث</summary><div style=\"margin-top:8px;\">" +

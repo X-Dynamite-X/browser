@@ -65,6 +65,7 @@ std::string commonPageHead(const std::string& title) {
            "    <a href=\"lite://downloads\">التحميلات</a>\n"
            "    <a href=\"lite://bookmarks\">المفضلة</a>\n"
            "    <a href=\"lite://history\">السجل</a>\n"
+           "    <a href=\"lite://settings\">الإعدادات</a>\n"
            "  </div>\n"
            "</div>\n";
 }
@@ -377,6 +378,7 @@ std::string buildVideoHtml() {
 
 std::string buildDownloadsHtml(StorageManager& storage) {
     auto downloads = storage.getDownloads();
+    bool hasActive = storage.hasActiveDownloads();
     std::string html = commonPageHead("مدير التحميلات وتحميل البرامج");
     html += "<div class=\"wrap\">\n"
             "<div class=\"hero\" style=\"padding:22px;\">\n"
@@ -387,6 +389,7 @@ std::string buildDownloadsHtml(StorageManager& storage) {
             "    <button type=\"submit\" class=\"btn btn-green\">بدء التحميل الآن</button>\n"
             "    <a class=\"btn btn-sec\" href=\"lite-action://open-downloads-dir\">فتح مجلد التحميلات</a>\n"
             "    <a class=\"btn\" href=\"lite://downloads\">تحديث الحالة</a>\n"
+            "    <a class=\"btn btn-sec\" style=\"color:#f87171;\" href=\"lite-action://clear-completed-downloads\">مسح المكتملة</a>\n"
             "  </form>\n"
             "  <div class=\"quick-links\">\n"
             "    <a href=\"https://www.7-zip.org\">7-Zip (ضغط الملفات)</a>\n"
@@ -411,21 +414,43 @@ std::string buildDownloadsHtml(StorageManager& storage) {
                 pct = 100;
             }
             std::string statusLabel;
-            if (it->status == DownloadStatus::InProgress) statusLabel = "قيد التحميل (" + std::to_string(pct) + "%)";
-            else if (it->status == DownloadStatus::Completed) statusLabel = "مكتمل بنجاح";
-            else if (it->status == DownloadStatus::Cancelled) statusLabel = "ملغى";
-            else statusLabel = "فشل التحميل";
+            if (it->status == DownloadStatus::InProgress) {
+                statusLabel = "قيد التحميل (" + std::to_string(pct) + "%)";
+                if (it->speedBytesPerSec > 0) {
+                    statusLabel += " - " + fs::formatBytes(it->speedBytesPerSec) + "/ث";
+                }
+            } else if (it->status == DownloadStatus::Paused) {
+                statusLabel = "متوقف مؤقتاً (" + std::to_string(pct) + "%)";
+            } else if (it->status == DownloadStatus::Completed) {
+                statusLabel = "مكتمل بنجاح";
+            } else if (it->status == DownloadStatus::Cancelled) {
+                statusLabel = "ملغى";
+            } else {
+                statusLabel = it->statusNote.empty() ? "فشل التحميل" : it->statusNote;
+            }
 
             std::string sizeInfo = fs::formatBytes(it->receivedBytes);
             if (it->totalBytes > 0) sizeInfo += " / " + fs::formatBytes(it->totalBytes);
+
+            std::string actions;
+            if (it->status == DownloadStatus::InProgress) {
+                actions += "<a class=\"btn btn-sec\" style=\"padding:4px 8px;font-size:11px;margin-left:4px;\" href=\"lite-action://pause-download?id=" + std::to_string(it->id) + "\">إيقاف مؤقت</a>";
+                actions += "<a class=\"btn btn-sec\" style=\"padding:4px 8px;font-size:11px;color:#f87171;\" href=\"lite-action://cancel-download?id=" + std::to_string(it->id) + "\">إلغاء</a>";
+            } else if (it->status == DownloadStatus::Paused) {
+                actions += "<a class=\"btn btn-green\" style=\"padding:4px 8px;font-size:11px;margin-left:4px;\" href=\"lite-action://resume-download?id=" + std::to_string(it->id) + "\">استئناف</a>";
+                actions += "<a class=\"btn btn-sec\" style=\"padding:4px 8px;font-size:11px;color:#f87171;\" href=\"lite-action://cancel-download?id=" + std::to_string(it->id) + "\">إلغاء</a>";
+            } else if (it->status == DownloadStatus::Completed) {
+                actions += "<a class=\"btn\" style=\"padding:4px 10px;font-size:12px;\" href=\"lite-action://open-downloaded?id=" + std::to_string(it->id) + "\">فتح الملف</a>";
+            } else {
+                actions += "<a class=\"btn btn-sec\" style=\"padding:4px 8px;font-size:11px;margin-left:4px;\" href=\"lite-action://resume-download?id=" + std::to_string(it->id) + "\">إعادة المحاولة</a>";
+            }
 
             html += "<tr><td><strong>" + fs::htmlEscape(it->fileName) + "</strong><br/><span style=\"font-size:11px;color:#64748b;\">" +
                     fs::htmlEscape(it->savePath) + "</span></td>"
                     "<td><div class=\"prog-bg\"><div class=\"prog-fill\" style=\"width:" + std::to_string(pct) + "%;\"></div></div>"
                     " <span style=\"font-size:12px;\">" + sizeInfo + "</span></td>"
                     "<td>" + fs::htmlEscape(statusLabel) + "</td>"
-                    "<td><a class=\"btn\" style=\"padding:4px 10px;font-size:12px;\" href=\"lite-action://open-downloaded?id=" +
-                    std::to_string(it->id) + "\">فتح الملف</a></td></tr>\n";
+                    "<td>" + actions + "</td></tr>\n";
         }
     }
     html += "</tbody></table>\n</div>\n"
@@ -435,6 +460,101 @@ std::string buildDownloadsHtml(StorageManager& storage) {
             "  if (!u) return false;\n"
             "  window.location.href = 'lite-action://download?url=' + encodeURIComponent(u);\n"
             "  return false;\n"
+            "}\n";
+    if (hasActive) {
+        html += "setInterval(function(){ location.reload(); }, 2000);\n";
+    }
+    html += "</script>\n</body>\n</html>\n";
+    return html;
+}
+
+std::string buildSettingsHtml(StorageManager& storage) {
+    auto s = storage.getSettings();
+    uint64_t blockedCount = storage.getBlockedAdsCount();
+
+    std::string html = commonPageHead("إعدادات المتصفح - LiteBrowser");
+    html += "<div class=\"wrap\">\n"
+            "<div class=\"hero\" style=\"text-align:right;padding:24px;\">\n"
+            "  <h1 style=\"margin-top:0;\">إعدادات متصفح النور الخفيف</h1>\n"
+            "  <p>تحكم بخيارات الأداء والخصوصية ومحركات البحث ومظهر المتصفح على كافة الأنظمة.</p>\n"
+            "</div>\n";
+
+    html += "<div style=\"background:#fff;border-radius:12px;padding:24px;border:1px solid #e2e8f0;margin-bottom:20px;\">\n"
+            "  <h3>محرك البحث والصفحة الرئيسية</h3>\n"
+            "  <div style=\"margin-bottom:14px;\">\n"
+            "    <label style=\"font-weight:bold;display:block;margin-bottom:6px;\">محرك البحث الافتراضي:</label>\n"
+            "    <select id=\"selSearch\" style=\"padding:8px 12px;border-radius:6px;border:1px solid #cbd5e1;font-size:14px;font-family:inherit;min-width:260px;\">\n";
+    html += std::string("      <option value=\"google\"") + (s.searchEngine == "google" ? " selected" : "") + ">Google (جوجل القياسي)</option>\n";
+    html += std::string("      <option value=\"ddg\"") + (s.searchEngine == "ddg" ? " selected" : "") + ">DuckDuckGo (الخصوصية الكاملة)</option>\n";
+    html += std::string("      <option value=\"ddg-lite\"") + (s.searchEngine == "ddg-lite" ? " selected" : "") + ">DuckDuckGo Lite (فائق السرعة والخفة لـ Windows XP والأجهزة القديمة)</option>\n";
+    html += std::string("      <option value=\"bing\"") + (s.searchEngine == "bing" ? " selected" : "") + ">Bing (مايكروسوفت بينج)</option>\n";
+    html += std::string("      <option value=\"youtube\"") + (s.searchEngine == "youtube" ? " selected" : "") + ">YouTube (بحث مباشر في يوتيوب)</option>\n";
+    html += "    </select>\n"
+            "    <button class=\"btn\" style=\"padding:8px 14px;margin-right:6px;\" onclick=\"saveSearchEngine()\">حفظ المحرك</button>\n"
+            "  </div>\n"
+            "  <div>\n"
+            "    <label style=\"font-weight:bold;display:block;margin-bottom:6px;\">الصفحة الرئيسية الافتراضية:</label>\n"
+            "    <input id=\"homeInp\" type=\"text\" value=\"" + fs::htmlEscape(s.homePage) + "\" style=\"padding:8px 12px;border-radius:6px;border:1px solid #cbd5e1;font-size:14px;font-family:inherit;width:320px;\"/>\n"
+            "    <button class=\"btn\" style=\"padding:8px 14px;margin-right:6px;\" onclick=\"saveHomePage()\">حفظ الصفحة</button>\n"
+            "  </div>\n"
+            "</div>\n";
+
+    html += "<div style=\"background:#fff;border-radius:12px;padding:24px;border:1px solid #e2e8f0;margin-bottom:20px;\">\n"
+            "  <h3>الأداء وتوفير الذاكرة (RAM)</h3>\n"
+            "  <div style=\"margin-bottom:12px;\">\n"
+            "    <label style=\"cursor:pointer;font-size:14px;\">\n"
+            "      <input type=\"checkbox\"" + std::string(s.liteMode ? " checked" : "") + " onchange=\"location.href='lite-action://toggle-lite'\"/> "
+            "      <strong>الوضع الخفيف (Lite Mode):</strong> تقليل استهلاك الذاكرة العشوائية وتخفيف الرسوميات (مثالي لـ Windows XP والأجهزة ذات الرام الأقل من 2GB)\n"
+            "    </label>\n"
+            "  </div>\n"
+            "  <div style=\"margin-bottom:12px;\">\n"
+            "    <label style=\"cursor:pointer;font-size:14px;\">\n"
+            "      <input type=\"checkbox\"" + std::string(s.adBlockEnabled ? " checked" : "") + " onchange=\"location.href='lite-action://toggle-adblock'\"/> "
+            "      <strong>مانع الإعلانات والمتتبعات المدمج:</strong> حجب الإعلانات المزعجة لتسريع التصفح (تم حجب " + std::to_string(blockedCount) + " إعلان حتى الآن)\n"
+            "    </label>\n"
+            "  </div>\n"
+            "  <div>\n"
+            "    <label style=\"cursor:pointer;font-size:14px;\">\n"
+            "      <input type=\"checkbox\"" + std::string(s.showBookmarksBar ? " checked" : "") + " onchange=\"location.href='lite-action://toggle-bookmarks-bar'\"/> "
+            "      <strong>إظهار شريط المفضلة العلوي:</strong> شريط أفقي أسفل شريط العنوان للوصول السريع لمواقعك\n"
+            "    </label>\n"
+            "  </div>\n"
+            "  <div style=\"margin-top:12px;\">\n"
+            "    <label style=\"cursor:pointer;font-size:14px;\">\n"
+            "      <input type=\"checkbox\"" + std::string(s.restoreSessionOnStartup ? " checked" : "") + " onchange=\"location.href='lite-action://toggle-restore-session'\"/> "
+            "      <strong>استعادة التبويبات عند التشغيل:</strong> فتح الصفحات التي كانت مفتوحة عند إغلاق المتصفح تلقائياً\n"
+            "    </label>\n"
+            "  </div>\n"
+            "</div>\n";
+
+    html += "<div style=\"background:#fff;border-radius:12px;padding:24px;border:1px solid #e2e8f0;margin-bottom:20px;\">\n"
+            "  <h3>إدارة الخصوصية والبيانات</h3>\n"
+            "  <p style=\"font-size:13px;color:#64748b;\">يمكنك مسح سجل التصفح، التحميلات القديمة، أو الملفات المؤقتة في أي وقت بنقرة واحدة.</p>\n"
+            "  <a class=\"btn btn-sec\" style=\"margin-left:8px;\" href=\"lite-action://clear-history\">مسح سجل التصفح</a>\n"
+            "  <a class=\"btn btn-sec\" style=\"margin-left:8px;\" href=\"lite-action://clear-completed-downloads\">مسح سجل التحميلات المكتملة</a>\n"
+            "  <a class=\"btn btn-sec\" style=\"margin-left:8px;color:#f87171;\" href=\"lite-action://clear-cache\">تفريغ الذاكرة المؤقتة (Cache)</a>\n"
+            "</div>\n";
+
+    std::string osName;
+#ifdef _WIN32
+    osName = "Windows (NT-compatible: XP / 7 / 8 / 10 / 11)";
+#else
+    osName = "Linux (GTK3 + WebKit2GTK)";
+#endif
+
+    html += "<div style=\"background:#f8fafc;border-radius:12px;padding:18px;border:1px solid #e2e8f0;font-size:13px;color:#475569;\">\n"
+            "  <strong>معلومات النظام والتطبيق:</strong> " + osName + " &nbsp;|&nbsp; "
+            "  <strong>مجلد الإعدادات:</strong> <code>" + fs::htmlEscape(storage.getBaseDir()) + "</code>\n"
+            "</div>\n"
+            "</div>\n"
+            "<script>\n"
+            "function saveSearchEngine() {\n"
+            "  var val = document.getElementById('selSearch').value;\n"
+            "  location.href = 'lite-action://set-setting?key=search_engine&val=' + encodeURIComponent(val);\n"
+            "}\n"
+            "function saveHomePage() {\n"
+            "  var val = document.getElementById('homeInp').value;\n"
+            "  location.href = 'lite-action://set-setting?key=home_page&val=' + encodeURIComponent(val);\n"
             "}\n"
             "</script>\n</body>\n</html>\n";
     return html;
@@ -498,6 +618,9 @@ InternalPageOutput renderInternalPage(const std::string& liteUri, StorageManager
     } else if (u == "lite://history") {
         out.title = "سجل التصفح";
         out.html = buildHistoryHtml(storage);
+    } else if (u == "lite://settings") {
+        out.title = "الإعدادات";
+        out.html = buildSettingsHtml(storage);
     } else {
         out.title = "الرئيسية";
         out.html = buildHomeHtml(storage);

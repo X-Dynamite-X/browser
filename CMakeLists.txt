@@ -16,6 +16,7 @@ set(LITEBROWSER_CORE_SOURCES
     src/core/url_utils.cpp
     src/core/storage.cpp
     src/core/internal_pages.cpp
+    src/core/downloader.cpp
 )
 
 add_library(litebrowser_core STATIC ${LITEBROWSER_CORE_SOURCES})

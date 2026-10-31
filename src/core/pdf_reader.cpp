@@ -518,6 +518,11 @@ bool tryRenderPdfWithPopplerLinux(const std::string& filePathUtf8, int maxVisual
                     pngBytes.reserve(65536);
                     if (surfWritePng(surf, &cairoPngWriteCb, &pngBytes) == 0 && !pngBytes.empty()) {
                         pc.pngBase64 = fs::base64Encode(pngBytes.data(), pngBytes.size());
+                        char pName[64];
+                        std::snprintf(pName, sizeof(pName), "page_%d.png", i + 1);
+                        std::string pPath = fs::joinPath(fs::getTempSessionDir(), pName);
+                        fs::writeFileBytes(pPath, pngBytes.data(), pngBytes.size());
+                        pc.imageFileUrl = fs::pathToFileUrl(pPath);
                         out.hasRenderedImages = true;
                     }
                 }

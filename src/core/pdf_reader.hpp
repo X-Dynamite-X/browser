@@ -7,6 +7,7 @@ namespace litebrowser {
 
 struct PdfPageContent {
     int pageNumber = 1;
+    std::string imageFileUrl; // file:// url pointing to lazy-loaded page image
     std::string pngBase64;   // Populated when high-fidelity visual rendering is available
     std::string textUtf8;    // Extracted searchable text for this page
     std::vector<std::string> jpegImagesBase64;

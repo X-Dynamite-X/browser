@@ -1,4 +1,5 @@
 #include "../core/document_viewer.hpp"
+#include "../core/downloader.hpp"
 #include "../core/fs_utils.hpp"
 #include "../core/internal_pages.hpp"
 #include "../core/storage.hpp"
@@ -7,6 +8,7 @@
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +43,7 @@ struct WebKitApi {
     double (*web_view_get_zoom_level)(GtkWidget*) = nullptr;
     void (*web_view_set_zoom_level)(GtkWidget*, double) = nullptr;
     void* (*web_view_get_settings)(GtkWidget*) = nullptr;
+    void* (*web_view_get_find_controller)(GtkWidget*) = nullptr;
 
     void (*settings_set_enable_javascript)(void*, gboolean) = nullptr;
     void (*settings_set_enable_webgl)(void*, gboolean) = nullptr;
@@ -54,6 +57,11 @@ struct WebKitApi {
     void (*settings_set_allow_file_access_from_file_urls)(void*, gboolean) = nullptr;
     void (*settings_set_hardware_acceleration_policy)(void*, int) = nullptr;
     void (*settings_set_user_agent)(void*, const char*) = nullptr;
+
+    void (*find_controller_search)(void*, const char*, uint32_t, uint32_t) = nullptr;
+    void (*find_controller_search_next)(void*) = nullptr;
+    void (*find_controller_search_previous)(void*) = nullptr;
+    void (*find_controller_search_finish)(void*) = nullptr;
 
     void* (*navigation_policy_decision_get_navigation_action)(void*) = nullptr;
     void* (*navigation_action_get_request)(void*) = nullptr;
@@ -107,6 +115,7 @@ struct WebKitApi {
         BIND_WK(web_view_get_zoom_level, "webkit_web_view_get_zoom_level");
         BIND_WK(web_view_set_zoom_level, "webkit_web_view_set_zoom_level");
         BIND_WK(web_view_get_settings, "webkit_web_view_get_settings");
+        BIND_WK(web_view_get_find_controller, "webkit_web_view_get_find_controller");
 
         BIND_WK(settings_set_enable_javascript, "webkit_settings_set_enable_javascript");
         BIND_WK(settings_set_enable_webgl, "webkit_settings_set_enable_webgl");
@@ -120,6 +129,11 @@ struct WebKitApi {
         BIND_WK(settings_set_allow_file_access_from_file_urls, "webkit_settings_set_allow_file_access_from_file_urls");
         BIND_WK(settings_set_hardware_acceleration_policy, "webkit_settings_set_hardware_acceleration_policy");
         BIND_WK(settings_set_user_agent, "webkit_settings_set_user_agent");
+
+        BIND_WK(find_controller_search, "webkit_find_controller_search");
+        BIND_WK(find_controller_search_next, "webkit_find_controller_search_next");
+        BIND_WK(find_controller_search_previous, "webkit_find_controller_search_previous");
+        BIND_WK(find_controller_search_finish, "webkit_find_controller_search_finish");
 
         BIND_WK(navigation_policy_decision_get_navigation_action, "webkit_navigation_policy_decision_get_navigation_action");
         BIND_WK(navigation_action_get_request, "webkit_navigation_action_get_request");
@@ -155,6 +169,7 @@ struct TabContext {
     GtkWidget* tabLabel = nullptr;
     std::string logicalUrl = "lite://home";
     std::string activeTempUrl;
+    bool isPrivate = false;
 };
 
 struct DownloadBinding {
@@ -172,6 +187,19 @@ struct BrowserApp {
     GtkWidget* btnBookmark = nullptr;
     GtkWidget* btnLiteMode = nullptr;
     GtkWidget* statusLabel = nullptr;
+
+    // Bookmarks bar
+    GtkWidget* bookmarksBar = nullptr;
+    bool bookmarksBarVisible = true;
+
+    // Find bar (Ctrl+F)
+    GtkWidget* findBar = nullptr;
+    GtkWidget* findEntry = nullptr;
+    GtkWidget* btnFindPrev = nullptr;
+    GtkWidget* btnFindNext = nullptr;
+    GtkWidget* btnFindClose = nullptr;
+    bool findBarVisible = false;
+
     std::vector<std::unique_ptr<TabContext>> tabs;
     int nextTabId = 1;
 
@@ -253,8 +281,9 @@ void updateToolbarForTab(BrowserApp* app, TabContext* tab) {
 }
 
 void navigateTab(TabContext* tab, const std::string& rawInput);
-TabContext* createNewTab(BrowserApp* app, const std::string& initialUrl, bool switchToIt = true);
+TabContext* createNewTab(BrowserApp* app, const std::string& initialUrl, bool switchToIt = true, bool isPrivate = false);
 void promptOpenDocument(BrowserApp* app);
+void refreshBookmarksBar(BrowserApp* app);
 
 void openDownloadedItem(BrowserApp* app, int dlId) {
     auto rec = app->storage.getDownloadById(dlId);
@@ -265,6 +294,94 @@ void openDownloadedItem(BrowserApp* app, int dlId) {
     }
     std::string uri = litebrowser::fs::pathToFileUrl(rec.savePath);
     gtk_show_uri_on_window(GTK_WINDOW(app->window), uri.c_str(), GDK_CURRENT_TIME, nullptr);
+}
+
+void showFindBar(BrowserApp* app, bool show) {
+    if (!app || !app->findBar) return;
+    app->findBarVisible = show;
+    if (show) {
+        gtk_widget_show_all(app->findBar);
+        gtk_widget_grab_focus(app->findEntry);
+        const char* txt = gtk_entry_get_text(GTK_ENTRY(app->findEntry));
+        if (txt && *txt) {
+            if (auto* cur = app->currentTab()) {
+                if (g_wk.web_view_get_find_controller && g_wk.find_controller_search) {
+                    void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                    if (fc) g_wk.find_controller_search(fc, txt, 0, G_MAXUINT);
+                }
+            }
+        }
+    } else {
+        gtk_widget_hide(app->findBar);
+        if (auto* cur = app->currentTab()) {
+            if (g_wk.web_view_get_find_controller && g_wk.find_controller_search_finish) {
+                void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                if (fc) g_wk.find_controller_search_finish(fc);
+            }
+            gtk_widget_grab_focus(cur->webView);
+        }
+    }
+}
+
+void toggleBookmarksBar(BrowserApp* app) {
+    if (!app || !app->bookmarksBar) return;
+    app->bookmarksBarVisible = !app->bookmarksBarVisible;
+    if (app->bookmarksBarVisible) {
+        refreshBookmarksBar(app);
+        gtk_widget_show_all(app->bookmarksBar);
+    } else {
+        gtk_widget_hide(app->bookmarksBar);
+    }
+}
+
+void refreshBookmarksBar(BrowserApp* app) {
+    if (!app || !app->bookmarksBar) return;
+
+    // Clear existing bookmark buttons
+    GList* children = gtk_container_get_children(GTK_CONTAINER(app->bookmarksBar));
+    for (GList* iter = children; iter != nullptr; iter = g_list_next(iter)) {
+        gtk_widget_destroy(GTK_WIDGET(iter->data));
+    }
+    g_list_free(children);
+
+    GtkWidget* labelIcon = gtk_label_new("⭐ الإشارات:");
+    gtk_widget_set_margin_start(labelIcon, 4);
+    gtk_widget_set_margin_end(labelIcon, 6);
+    gtk_box_pack_start(GTK_BOX(app->bookmarksBar), labelIcon, FALSE, FALSE, 0);
+
+    auto bookmarks = app->storage.getBookmarks();
+    size_t count = std::min(bookmarks.size(), static_cast<size_t>(12));
+    for (size_t i = 0; i < count; ++i) {
+        const auto& bm = bookmarks[i];
+        std::string shortTitle = bm.title.empty() ? bm.url : bm.title;
+        if (shortTitle.size() > 22) shortTitle = shortTitle.substr(0, 19) + "...";
+
+        GtkWidget* btn = gtk_button_new_with_label(shortTitle.c_str());
+        gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
+        gtk_widget_set_tooltip_text(btn, bm.url.c_str());
+
+        g_object_set_data_full(G_OBJECT(btn), "target_url", g_strdup(bm.url.c_str()), g_free);
+        g_signal_connect(G_OBJECT(btn), "clicked", G_CALLBACK(+[](GtkButton* b, gpointer d) {
+            auto* a = static_cast<BrowserApp*>(d);
+            const char* u = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "target_url"));
+            if (u && a->currentTab()) navigateTab(a->currentTab(), u);
+        }), app);
+
+        gtk_box_pack_start(GTK_BOX(app->bookmarksBar), btn, FALSE, FALSE, 2);
+    }
+
+    // Add manager shortcut button
+    GtkWidget* btnManage = gtk_button_new_with_label("+ الإشارات");
+    gtk_button_set_relief(GTK_BUTTON(btnManage), GTK_RELIEF_NONE);
+    g_signal_connect(G_OBJECT(btnManage), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (a->currentTab()) navigateTab(a->currentTab(), "lite://bookmarks");
+    }), app);
+    gtk_box_pack_start(GTK_BOX(app->bookmarksBar), btnManage, FALSE, FALSE, 4);
+
+    if (app->bookmarksBarVisible) {
+        gtk_widget_show_all(app->bookmarksBar);
+    }
 }
 
 void handleLiteAction(TabContext* tab, const std::string& actionUri) {
@@ -290,15 +407,41 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "download?url=")) {
         std::string encoded = rest.substr(std::strlen("download?url="));
         std::string dlUrl = litebrowser::fs::urlDecode(encoded);
-        if (!dlUrl.empty() && g_wk.web_context_download_uri) {
+        if (!dlUrl.empty()) {
             if (!litebrowser::fs::startsWithIgnoreCase(dlUrl, "http://") &&
                 !litebrowser::fs::startsWithIgnoreCase(dlUrl, "https://")) {
                 dlUrl = "https://" + dlUrl;
             }
-            g_wk.web_context_download_uri(g_wk.web_context_get_default(), dlUrl.c_str());
-            setStatus(app, "بدأ التحميل: " + dlUrl);
+            // Start through DownloaderPool for complete pause/resume capability
+            int dlId = litebrowser::DownloaderPool::instance().startDownload(
+                app->storage, dlUrl, "", false, [app](const litebrowser::DownloadProgressInfo& p) {
+                    if (p.status == litebrowser::DownloadStatus::Completed) {
+                        setStatus(app, "اكتمل التحميل بنجاح!");
+                    }
+                });
+            if (dlId > 0) {
+                setStatus(app, "بدأ التحميل في الخلفية: " + dlUrl);
+            } else if (g_wk.web_context_download_uri) {
+                g_wk.web_context_download_uri(g_wk.web_context_get_default(), dlUrl.c_str());
+                setStatus(app, "بدأ التحميل عبر المتصفح: " + dlUrl);
+            }
             navigateTab(tab, "lite://downloads");
         }
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "pause-download?id=")) {
+        int id = std::atoi(rest.c_str() + std::strlen("pause-download?id="));
+        litebrowser::DownloaderPool::instance().pauseDownload(id, app->storage);
+        setStatus(app, "تم إيقاف التحميل مؤقتاً");
+        navigateTab(tab, "lite://downloads");
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "resume-download?id=")) {
+        int id = std::atoi(rest.c_str() + std::strlen("resume-download?id="));
+        litebrowser::DownloaderPool::instance().resumeDownload(id, app->storage);
+        setStatus(app, "تم استئناف التحميل");
+        navigateTab(tab, "lite://downloads");
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "cancel-download?id=")) {
+        int id = std::atoi(rest.c_str() + std::strlen("cancel-download?id="));
+        litebrowser::DownloaderPool::instance().cancelDownload(id, app->storage);
+        setStatus(app, "تم إلغاء التحميل");
+        navigateTab(tab, "lite://downloads");
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "open-downloads-dir")) {
         std::string uri = litebrowser::fs::pathToFileUrl(litebrowser::fs::getDownloadsDir());
         gtk_show_uri_on_window(GTK_WINDOW(app->window), uri.c_str(), GDK_CURRENT_TIME, nullptr);
@@ -308,10 +451,44 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "remove-bookmark?idx=")) {
         size_t idx = static_cast<size_t>(std::strtoul(rest.c_str() + std::strlen("remove-bookmark?idx="), nullptr, 10));
         app->storage.removeBookmarkByIndex(idx);
+        refreshBookmarksBar(app);
         navigateTab(tab, "lite://bookmarks");
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "clear-history")) {
         app->storage.clearHistory();
         navigateTab(tab, "lite://history");
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "clear-cache")) {
+        litebrowser::fs::cleanupTempSessionDir();
+        setStatus(app, "تم تفريغ ملفات الذاكرة المؤقتة بنجاح");
+        navigateTab(tab, "lite://settings");
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "set-setting?")) {
+        std::string q = rest.substr(std::strlen("set-setting?"));
+        std::string key, val;
+        size_t amp = q.find('&');
+        if (q.find("key=") == 0 && amp != std::string::npos && q.find("val=", amp + 1) != std::string::npos) {
+            key = q.substr(4, amp - 4);
+            val = q.substr(amp + 5);
+        }
+        key = litebrowser::fs::urlDecode(key);
+        val = litebrowser::fs::urlDecode(val);
+
+        auto s = app->storage.getSettings();
+        if (key == "search-engine") s.searchEngine = val;
+        else if (key == "homepage") s.homePage = val;
+        else if (key == "restore-session") s.restoreSessionOnStartup = (val == "1" || val == "true");
+        else if (key == "adblock") s.adBlockEnabled = (val == "1" || val == "true");
+        else if (key == "show-bookmarks") {
+            s.showBookmarksBar = (val == "1" || val == "true");
+            app->bookmarksBarVisible = s.showBookmarksBar;
+            gtk_widget_set_visible(app->bookmarksBar, app->bookmarksBarVisible);
+        } else if (key == "lite-mode") {
+            s.liteMode = (val == "1" || val == "true");
+            gtk_button_set_label(GTK_BUTTON(app->btnLiteMode), s.liteMode ? "⚡ خفيف: مفعّل" : "⚡ خفيف");
+            for (auto& t : app->tabs) applyEngineSettingsToView(t->webView, s);
+        }
+
+        app->storage.updateSettings(s);
+        setStatus(app, "تم تحديث الإعدادات بنجاح");
+        navigateTab(tab, "lite://settings");
     }
 }
 
@@ -325,7 +502,7 @@ void navigateTab(TabContext* tab, const std::string& rawInput) {
         auto page = litebrowser::renderInternalPage(resolved.targetUrlOrPath, app->storage, tab->tabId);
         tab->logicalUrl = resolved.targetUrlOrPath;
         tab->activeTempUrl = page.tempFileUrl;
-        gtk_label_set_text(GTK_LABEL(tab->tabLabel), page.title.c_str());
+        gtk_label_set_text(GTK_LABEL(tab->tabLabel), tab->isPrivate ? ("[سري] " + page.title).c_str() : page.title.c_str());
         g_wk.web_view_load_uri(tab->webView, page.tempFileUrl.c_str());
         updateToolbarForTab(app, tab);
         setStatus(app, page.title);
@@ -334,7 +511,7 @@ void navigateTab(TabContext* tab, const std::string& rawInput) {
         auto doc = litebrowser::renderDocumentToHtml(resolved.targetUrlOrPath, tab->tabId);
         tab->logicalUrl = resolved.targetUrlOrPath;
         tab->activeTempUrl = doc.tempFileUrl;
-        gtk_label_set_text(GTK_LABEL(tab->tabLabel), doc.tabTitle.c_str());
+        gtk_label_set_text(GTK_LABEL(tab->tabLabel), tab->isPrivate ? ("[سري] " + doc.tabTitle).c_str() : doc.tabTitle.c_str());
         g_wk.web_view_load_uri(tab->webView, doc.tempFileUrl.c_str());
         updateToolbarForTab(app, tab);
         setStatus(app, "تم فتح المستند: " + doc.tabTitle);
@@ -364,7 +541,9 @@ void onWebViewLoadChanged(GtkWidget* webView, int loadEvent, gpointer userData) 
         }
         const char* title = g_wk.web_view_get_title ? g_wk.web_view_get_title(webView) : nullptr;
         std::string tStr = (title && *title) ? title : tab->logicalUrl;
-        app->storage.addHistory(tStr, tab->logicalUrl);
+        if (!tab->isPrivate && !litebrowser::fs::startsWithIgnoreCase(tab->logicalUrl, "lite://")) {
+            app->storage.addHistory(tStr, tab->logicalUrl);
+        }
         if (tab == app->currentTab()) setStatus(app, "جاهز");
     }
 }
@@ -374,7 +553,8 @@ void onWebViewNotifyTitle(GObject*, GParamSpec*, gpointer userData) {
     const char* title = g_wk.web_view_get_title ? g_wk.web_view_get_title(tab->webView) : nullptr;
     if (title && *title) {
         std::string shortTitle(title);
-        if (shortTitle.size() > 36) shortTitle = shortTitle.substr(0, 33) + "...";
+        if (shortTitle.size() > 34) shortTitle = shortTitle.substr(0, 31) + "...";
+        if (tab->isPrivate) shortTitle = "[سري] " + shortTitle;
         gtk_label_set_text(GTK_LABEL(tab->tabLabel), shortTitle.c_str());
     }
 }
@@ -407,7 +587,7 @@ gboolean onWebViewDecidePolicy(GtkWidget*, void* decision, int decisionType, gpo
         }
         if (litebrowser::fs::startsWithIgnoreCase(uri, "lite://")) {
             g_wk.policy_decision_ignore(decision);
-            if (decisionType == 1) createNewTab(app, uri, true);
+            if (decisionType == 1) createNewTab(app, uri, true, tab->isPrivate);
             else navigateTab(tab, uri);
             return TRUE;
         }
@@ -426,7 +606,7 @@ gboolean onWebViewDecidePolicy(GtkWidget*, void* decision, int decisionType, gpo
         }
         if (decisionType == 1) {
             g_wk.policy_decision_ignore(decision);
-            createNewTab(app, uri, true);
+            createNewTab(app, uri, true, tab->isPrivate);
             return TRUE;
         }
     } else if (decisionType == 2) {  // WEBKIT_POLICY_DECISION_TYPE_RESPONSE
@@ -486,7 +666,7 @@ void onDownloadFinished(void*, gpointer userData) {
     if (bind->recordId != 0) {
         bind->app->storage.finishDownload(bind->recordId, litebrowser::DownloadStatus::Completed);
         auto rec = bind->app->storage.getDownloadById(bind->recordId);
-        setStatus(bind->app, "اكتمل التحميل بنجاح: " + rec.fileName + " (يمكنك فتحه من صفحة التحميلات)");
+        setStatus(bind->app, "اكتمل التحميل بنجاح: " + rec.fileName);
     }
     delete bind;
 }
@@ -512,6 +692,11 @@ void onContextDownloadStarted(void*, void* download, gpointer userData) {
 void onCloseTabClicked(GtkButton*, gpointer userData) {
     auto* tab = static_cast<TabContext*>(userData);
     BrowserApp* app = tab->app;
+
+    if (!tab->isPrivate && !tab->logicalUrl.empty() && tab->logicalUrl != "lite://home") {
+        app->storage.pushClosedTab(tab->logicalUrl);
+    }
+
     if (app->tabs.size() <= 1) {
         navigateTab(tab, "lite://home");
         return;
@@ -526,10 +711,11 @@ void onCloseTabClicked(GtkButton*, gpointer userData) {
     }
 }
 
-TabContext* createNewTab(BrowserApp* app, const std::string& initialUrl, bool switchToIt) {
+TabContext* createNewTab(BrowserApp* app, const std::string& initialUrl, bool switchToIt, bool isPrivate) {
     auto tab = std::make_unique<TabContext>();
     tab->app = app;
     tab->tabId = app->nextTabId++;
+    tab->isPrivate = isPrivate;
 
     tab->webView = g_wk.web_view_new();
     applyEngineSettingsToView(tab->webView, app->storage.getSettings());
@@ -538,7 +724,7 @@ TabContext* createNewTab(BrowserApp* app, const std::string& initialUrl, bool sw
     gtk_box_pack_start(GTK_BOX(tab->container), tab->webView, TRUE, TRUE, 0);
 
     GtkWidget* tabHeader = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    tab->tabLabel = gtk_label_new("تبويب جديد");
+    tab->tabLabel = gtk_label_new(isPrivate ? "🕵️ تبويب سري" : "تبويب جديد");
     GtkWidget* closeBtn = gtk_button_new_with_label("×");
     gtk_button_set_relief(GTK_BUTTON(closeBtn), GTK_RELIEF_NONE);
     gtk_box_pack_start(GTK_BOX(tabHeader), tab->tabLabel, FALSE, FALSE, 0);
@@ -604,28 +790,142 @@ void promptOpenDocument(BrowserApp* app) {
 gboolean onWindowKeyPress(GtkWidget*, GdkEventKey* event, gpointer userData) {
     auto* app = static_cast<BrowserApp*>(userData);
     bool ctrl = (event->state & GDK_CONTROL_MASK) != 0;
-    if (ctrl && (event->keyval == GDK_KEY_t || event->keyval == GDK_KEY_T)) {
+    bool shift = (event->state & GDK_SHIFT_MASK) != 0;
+
+    // Ctrl+Shift+T: Reopen last closed tab
+    if (ctrl && shift && (event->keyval == GDK_KEY_t || event->keyval == GDK_KEY_T)) {
+        std::string closed = app->storage.popClosedTab();
+        if (!closed.empty()) {
+            createNewTab(app, closed, true);
+            setStatus(app, "تمت استعادة التبويب المغلق: " + closed);
+        } else {
+            setStatus(app, "لا توجد تبويبات مغلقة مؤخراً");
+        }
+        return TRUE;
+    }
+
+    // Ctrl+Shift+N: New private tab
+    if (ctrl && shift && (event->keyval == GDK_KEY_n || event->keyval == GDK_KEY_N)) {
+        createNewTab(app, "lite://home", true, true);
+        setStatus(app, "تم فتح تبويب تصفح سري لا يحفظ في السجل");
+        return TRUE;
+    }
+
+    // Ctrl+Shift+B: Toggle Bookmarks Bar
+    if (ctrl && shift && (event->keyval == GDK_KEY_b || event->keyval == GDK_KEY_B)) {
+        toggleBookmarksBar(app);
+        return TRUE;
+    }
+
+    // Ctrl+T: New Tab
+    if (ctrl && !shift && (event->keyval == GDK_KEY_t || event->keyval == GDK_KEY_T)) {
         createNewTab(app, "lite://home", true);
         return TRUE;
     }
+
+    // Ctrl+W: Close Tab
     if (ctrl && (event->keyval == GDK_KEY_w || event->keyval == GDK_KEY_W)) {
         if (auto* t = app->currentTab()) onCloseTabClicked(nullptr, t);
         return TRUE;
     }
+
+    // Ctrl+O: Open Document
     if (ctrl && (event->keyval == GDK_KEY_o || event->keyval == GDK_KEY_O)) {
         promptOpenDocument(app);
         return TRUE;
     }
+
+    // Ctrl+L: Focus Omnibox
     if (ctrl && (event->keyval == GDK_KEY_l || event->keyval == GDK_KEY_L)) {
         gtk_widget_grab_focus(app->urlEntry);
         gtk_editable_select_region(GTK_EDITABLE(app->urlEntry), 0, -1);
         return TRUE;
     }
+
+    // Ctrl+F: In-Page Find Bar
+    if (ctrl && (event->keyval == GDK_KEY_f || event->keyval == GDK_KEY_F)) {
+        showFindBar(app, true);
+        return TRUE;
+    }
+
+    // Escape: Close Find Bar
+    if (event->keyval == GDK_KEY_Escape) {
+        if (app->findBarVisible) {
+            showFindBar(app, false);
+            return TRUE;
+        }
+    }
+
+    // Zoom In: Ctrl + Plus / Ctrl + Equal / Ctrl + Numpad Plus
+    if (ctrl && (event->keyval == GDK_KEY_plus || event->keyval == GDK_KEY_equal || event->keyval == GDK_KEY_KP_Add)) {
+        if (auto* t = app->currentTab()) {
+            if (g_wk.web_view_get_zoom_level && g_wk.web_view_set_zoom_level) {
+                double z = g_wk.web_view_get_zoom_level(t->webView);
+                double n = std::min(3.0, z * 1.15);
+                g_wk.web_view_set_zoom_level(t->webView, n);
+                setStatus(app, "تكبير الصفحة: " + std::to_string(static_cast<int>(n * 100)) + "%");
+            }
+        }
+        return TRUE;
+    }
+
+    // Zoom Out: Ctrl + Minus / Ctrl + Numpad Minus
+    if (ctrl && (event->keyval == GDK_KEY_minus || event->keyval == GDK_KEY_underscore || event->keyval == GDK_KEY_KP_Subtract)) {
+        if (auto* t = app->currentTab()) {
+            if (g_wk.web_view_get_zoom_level && g_wk.web_view_set_zoom_level) {
+                double z = g_wk.web_view_get_zoom_level(t->webView);
+                double n = std::max(0.3, z / 1.15);
+                g_wk.web_view_set_zoom_level(t->webView, n);
+                setStatus(app, "تصغير الصفحة: " + std::to_string(static_cast<int>(n * 100)) + "%");
+            }
+        }
+        return TRUE;
+    }
+
+    // Reset Zoom: Ctrl + 0
+    if (ctrl && (event->keyval == GDK_KEY_0 || event->keyval == GDK_KEY_KP_0)) {
+        if (auto* t = app->currentTab()) {
+            if (g_wk.web_view_set_zoom_level) {
+                g_wk.web_view_set_zoom_level(t->webView, 1.0);
+                setStatus(app, "الحجم الطبيعي: 100%");
+            }
+        }
+        return TRUE;
+    }
+
+    // F5: Reload
     if (event->keyval == GDK_KEY_F5) {
         if (auto* t = app->currentTab()) navigateTab(t, t->logicalUrl);
         return TRUE;
     }
+
+    // F11: Fullscreen Toggle
+    if (event->keyval == GDK_KEY_F11) {
+        static bool isFull = false;
+        if (isFull) {
+            gtk_window_unfullscreen(GTK_WINDOW(app->window));
+        } else {
+            gtk_window_fullscreen(GTK_WINDOW(app->window));
+        }
+        isFull = !isFull;
+        return TRUE;
+    }
+
     return FALSE;
+}
+
+void onWindowDestroy(GtkWidget*, gpointer userData) {
+    auto* app = static_cast<BrowserApp*>(userData);
+    if (app && app->storage.getSettings().restoreSessionOnStartup) {
+        std::vector<std::string> sessionUrls;
+        for (const auto& t : app->tabs) {
+            if (!t->isPrivate && !t->logicalUrl.empty() && t->logicalUrl != "lite://home") {
+                sessionUrls.push_back(t->logicalUrl);
+            }
+        }
+        app->storage.saveSessionTabs(sessionUrls);
+    }
+    gtk_main_quit();
 }
 
 }  // namespace
@@ -659,8 +959,8 @@ int main(int argc, char* argv[]) {
 
     app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app.window), "متصفح النور الخفيف - LiteBrowser");
-    gtk_window_set_default_size(GTK_WINDOW(app.window), 1180, 760);
-    g_signal_connect(G_OBJECT(app.window), "destroy", G_CALLBACK(gtk_main_quit), nullptr);
+    gtk_window_set_default_size(GTK_WINDOW(app.window), 1200, 780);
+    g_signal_connect(G_OBJECT(app.window), "destroy", G_CALLBACK(onWindowDestroy), &app);
     g_signal_connect(G_OBJECT(app.window), "key-press-event", G_CALLBACK(onWindowKeyPress), &app);
 
     GtkWidget* rootVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -671,7 +971,7 @@ int main(int argc, char* argv[]) {
     gtk_widget_set_margin_start(navBar, 6);
     gtk_widget_set_margin_end(navBar, 6);
     gtk_widget_set_margin_top(navBar, 6);
-    gtk_widget_set_margin_bottom(navBar, 6);
+    gtk_widget_set_margin_bottom(navBar, 4);
 
     app.btnBack = gtk_button_new_with_label("◀");
     app.btnForward = gtk_button_new_with_label("▶");
@@ -684,6 +984,7 @@ int main(int argc, char* argv[]) {
     GtkWidget* btnOpenDoc = gtk_button_new_with_label("📂 PDF/Word");
     GtkWidget* btnGames = gtk_button_new_with_label("🎮 ألعاب");
     GtkWidget* btnDownloads = gtk_button_new_with_label("⬇️ التحميلات");
+    GtkWidget* btnSettings = gtk_button_new_with_label("⚙️ الإعدادات");
     auto initSettings = app.storage.getSettings();
     app.btnLiteMode = gtk_button_new_with_label(initSettings.liteMode ? "⚡ خفيف: مفعّل" : "⚡ خفيف");
     GtkWidget* btnNewTab = gtk_button_new_with_label("+ تبويب");
@@ -697,10 +998,42 @@ int main(int argc, char* argv[]) {
     gtk_box_pack_start(GTK_BOX(navBar), btnOpenDoc, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), btnGames, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), btnDownloads, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), btnSettings, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), app.btnLiteMode, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), btnNewTab, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(rootVBox), navBar, FALSE, FALSE, 0);
+
+    // Bookmarks Bar (Ctrl+Shift+B)
+    app.bookmarksBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_margin_start(app.bookmarksBar, 8);
+    gtk_widget_set_margin_end(app.bookmarksBar, 8);
+    gtk_widget_set_margin_bottom(app.bookmarksBar, 4);
+    gtk_box_pack_start(GTK_BOX(rootVBox), app.bookmarksBar, FALSE, FALSE, 0);
+    refreshBookmarksBar(&app);
+
+    // Find Bar (Ctrl+F)
+    app.findBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(app.findBar, 10);
+    gtk_widget_set_margin_end(app.findBar, 10);
+    gtk_widget_set_margin_bottom(app.findBar, 4);
+
+    GtkWidget* findLbl = gtk_label_new("البحث في الصفحة:");
+    app.findEntry = gtk_search_entry_new();
+    app.btnFindPrev = gtk_button_new_with_label("▲ السابق");
+    app.btnFindNext = gtk_button_new_with_label("▼ التالي");
+    app.btnFindClose = gtk_button_new_with_label("×");
+    gtk_button_set_relief(GTK_BUTTON(app.btnFindClose), GTK_RELIEF_NONE);
+
+    gtk_box_pack_start(GTK_BOX(app.findBar), findLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.findBar), app.findEntry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(app.findBar), app.btnFindPrev, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.findBar), app.btnFindNext, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.findBar), app.btnFindClose, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(rootVBox), app.findBar, FALSE, FALSE, 0);
+    gtk_widget_set_no_show_all(app.findBar, TRUE);
+    gtk_widget_hide(app.findBar);
 
     // Tab Notebook
     app.notebook = gtk_notebook_new();
@@ -716,6 +1049,58 @@ int main(int argc, char* argv[]) {
     app.statusLabel = gtk_label_new("جاهز");
     gtk_box_pack_start(GTK_BOX(statusBox), app.statusLabel, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(rootVBox), statusBox, FALSE, FALSE, 0);
+
+    // Find bar signal connections
+    g_signal_connect(G_OBJECT(app.findEntry), "search-changed", G_CALLBACK(+[](GtkSearchEntry* entry, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        const char* txt = gtk_entry_get_text(GTK_ENTRY(entry));
+        if (auto* cur = a->currentTab()) {
+            if (g_wk.web_view_get_find_controller && g_wk.find_controller_search && g_wk.find_controller_search_finish) {
+                void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                if (fc) {
+                    if (txt && *txt) {
+                        g_wk.find_controller_search(fc, txt, 0, G_MAXUINT);
+                    } else {
+                        g_wk.find_controller_search_finish(fc);
+                    }
+                }
+            }
+        }
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.findEntry), "activate", G_CALLBACK(+[](GtkEntry*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* cur = a->currentTab()) {
+            if (g_wk.web_view_get_find_controller && g_wk.find_controller_search_next) {
+                void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                if (fc) g_wk.find_controller_search_next(fc);
+            }
+        }
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.btnFindNext), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* cur = a->currentTab()) {
+            if (g_wk.web_view_get_find_controller && g_wk.find_controller_search_next) {
+                void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                if (fc) g_wk.find_controller_search_next(fc);
+            }
+        }
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.btnFindPrev), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* cur = a->currentTab()) {
+            if (g_wk.web_view_get_find_controller && g_wk.find_controller_search_previous) {
+                void* fc = g_wk.web_view_get_find_controller(cur->webView);
+                if (fc) g_wk.find_controller_search_previous(fc);
+            }
+        }
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.btnFindClose), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        showFindBar(static_cast<BrowserApp*>(d), false);
+    }), &app);
 
     // Wire toolbar signals
     g_signal_connect(G_OBJECT(app.btnBack), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
@@ -757,6 +1142,7 @@ int main(int argc, char* argv[]) {
             const char* title = g_wk.web_view_get_title ? g_wk.web_view_get_title(t->webView) : nullptr;
             a->storage.toggleBookmark((title && *title) ? title : t->logicalUrl, t->logicalUrl);
             updateToolbarForTab(a, t);
+            refreshBookmarksBar(a);
         }
     }), &app);
 
@@ -772,6 +1158,11 @@ int main(int argc, char* argv[]) {
     g_signal_connect(G_OBJECT(btnDownloads), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) navigateTab(t, "lite://downloads");
+    }), &app);
+
+    g_signal_connect(G_OBJECT(btnSettings), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* t = a->currentTab()) navigateTab(t, "lite://settings");
     }), &app);
 
     g_signal_connect(G_OBJECT(app.btnLiteMode), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
@@ -793,8 +1184,25 @@ int main(int argc, char* argv[]) {
         }
     }), &app);
 
-    std::string startTarget = (argc >= 2) ? argv[1] : app.storage.getSettings().homePage;
-    createNewTab(&app, startTarget, true);
+    // Session Restore or start target
+    bool restored = false;
+    if (app.storage.getSettings().restoreSessionOnStartup) {
+        auto saved = app.storage.loadSessionTabs();
+        if (!saved.empty()) {
+            for (const auto& u : saved) {
+                createNewTab(&app, u, false);
+            }
+            if (!app.tabs.empty()) {
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(app.notebook), 0);
+                restored = true;
+            }
+        }
+    }
+
+    if (!restored) {
+        std::string startTarget = (argc >= 2) ? argv[1] : app.storage.getSettings().homePage;
+        createNewTab(&app, startTarget, true);
+    }
 
     gtk_widget_show_all(app.window);
     gtk_main();
@@ -802,4 +1210,3 @@ int main(int argc, char* argv[]) {
     litebrowser::fs::cleanupTempSessionDir();
     return 0;
 }
-

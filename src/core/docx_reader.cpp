@@ -264,6 +264,9 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
     bool inRun = false;
     bool inText = false;
     bool inTable = false;
+    bool inTc = false;
+    int cellColSpan = 1;
+    std::string cellBgColor;
     bool paraBidi = false;
     bool paraIsList = false;
     std::string paraStyle;
@@ -360,8 +363,23 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
             } else if (local == "tr" && inTable) {
                 res.bodyHtml += "<tr>";
             } else if (local == "tc" && inTable) {
-                res.bodyHtml += "<td>";
+                inTc = true;
+                cellColSpan = 1;
+                cellBgColor.clear();
+            } else if (local == "gridSpan" && inTc) {
+                cellColSpan = std::max(1, std::atoi(getAttrAnyNs(tok.attrs, "val").c_str()));
+            } else if (local == "shd" && inTc) {
+                std::string f = getAttrAnyNs(tok.attrs, "fill");
+                if (!f.empty() && f != "auto") cellBgColor = f;
             } else if (local == "p") {
+                if (inTc) {
+                    std::string tdTag = "<td";
+                    if (cellColSpan > 1) tdTag += " colspan=\"" + std::to_string(cellColSpan) + "\"";
+                    if (!cellBgColor.empty()) tdTag += " style=\"background-color:#" + fs::htmlEscape(cellBgColor) + ";\"";
+                    tdTag += ">";
+                    res.bodyHtml += tdTag;
+                    inTc = false;
+                }
                 flushParagraph();
                 inParagraph = true;
                 paraBidi = false;
@@ -444,6 +462,14 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
             } else if (local == "p") {
                 flushParagraph();
             } else if (local == "tc" && inTable) {
+                if (inTc) {
+                    std::string tdTag = "<td";
+                    if (cellColSpan > 1) tdTag += " colspan=\"" + std::to_string(cellColSpan) + "\"";
+                    if (!cellBgColor.empty()) tdTag += " style=\"background-color:#" + fs::htmlEscape(cellBgColor) + ";\"";
+                    tdTag += ">";
+                    res.bodyHtml += tdTag;
+                    inTc = false;
+                }
                 flushParagraph();
                 res.bodyHtml += "</td>";
             } else if (local == "tr" && inTable) {
@@ -456,6 +482,45 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
     }
 
     flushParagraph();
+
+    // Parse footnotes if present
+    std::string fnXml;
+    if (zip.extractEntryText("word/footnotes.xml", fnXml)) {
+        auto fnTokens = tokenizeXml(fnXml);
+        std::vector<std::string> footnotes;
+        std::string curFn;
+        bool inFn = false, inFnT = false;
+        for (const auto& t : fnTokens) {
+            std::string loc = localTagName(t.name);
+            if (t.type == XmlToken::OpenTag && loc == "footnote") {
+                std::string typeVal = getAttrAnyNs(t.attrs, "type");
+                if (typeVal.empty() || typeVal == "normal") {
+                    inFn = true;
+                    curFn.clear();
+                }
+            } else if (t.type == XmlToken::CloseTag && loc == "footnote") {
+                if (inFn && !fs::trim(curFn).empty()) {
+                    footnotes.push_back(fs::trim(curFn));
+                }
+                inFn = false;
+            } else if (t.type == XmlToken::OpenTag && loc == "t") {
+                inFnT = true;
+            } else if (t.type == XmlToken::CloseTag && loc == "t") {
+                inFnT = false;
+            } else if (t.type == XmlToken::Text && inFn && inFnT) {
+                curFn += t.text;
+            }
+        }
+        if (!footnotes.empty()) {
+            res.bodyHtml += "<div class=\"doc-footnotes\" style=\"margin-top:28px;padding-top:14px;border-top:2px dashed #cbd5e1;\">\n";
+            res.bodyHtml += "<h4 style=\"margin-bottom:8px;\">الهوامش والحواشي السفلية:</h4>\n<ol style=\"font-size:13px;color:#475569;\">\n";
+            for (const auto& fn : footnotes) {
+                res.bodyHtml += "<li>" + fs::htmlEscape(fn) + "</li>\n";
+            }
+            res.bodyHtml += "</ol></div>\n";
+        }
+    }
+
     res.wordCount = countWordsUtf8(res.plainText);
     res.ok = true;
     return res;

@@ -75,10 +75,11 @@ struct HistoryEntry {
 };
 
 enum class DownloadStatus {
-    InProgress,
-    Completed,
-    Failed,
-    Cancelled
+    InProgress = 0,
+    Paused = 1,
+    Completed = 2,
+    Failed = 3,
+    Cancelled = 4
 };
 
 struct DownloadRecord {
@@ -88,20 +89,26 @@ struct DownloadRecord {
     std::string savePath;
     uint64_t receivedBytes = 0;
     uint64_t totalBytes = 0;
+    uint64_t speedBytesPerSec = 0;
+    bool openInReaderWhenDone = false;
     DownloadStatus status = DownloadStatus::InProgress;
     std::string statusNote;
 };
 
 struct BrowserSettings {
-    bool liteMode = false;         // الوضع الخفيف للأجهزة الضعيفة والأنظمة القديمة
-    bool adBlockEnabled = true;    // مانع الإعلانات والمتتبعات المدمج
-    std::string searchEngine = "google";  // google | ddg | ddg-lite | youtube
+    bool liteMode = false;                 // الوضع الخفيف للأجهزة الضعيفة و Windows XP
+    bool adBlockEnabled = true;            // مانع الإعلانات والنوافذ المنبثقة
+    bool showBookmarksBar = true;          // إظهار شريط المفضلة العلوي
+    bool restoreSessionOnStartup = false;  // استعادة التبويبات المفتوحة عند التشغيل
+    std::string searchEngine = "google";   // google | ddg | ddg-lite | bing | youtube
     std::string homePage = "lite://home";
 };
 
 class StorageManager {
 public:
     explicit StorageManager(const std::string& customDir = "");
+
+    std::string getBaseDir() const { return baseDir_; }
 
     BrowserSettings getSettings();
     void updateSettings(const BrowserSettings& s);
@@ -115,17 +122,32 @@ public:
     void addHistory(const std::string& title, const std::string& url);
     void clearHistory();
 
-    int addDownload(const std::string& fileName, const std::string& url, const std::string& savePath);
-    void updateDownloadProgress(int id, uint64_t receivedBytes, uint64_t totalBytes);
+    int addDownload(const std::string& fileName, const std::string& url,
+                    const std::string& savePath, bool openInReaderWhenDone = false);
+    void updateDownloadProgress(int id, uint64_t receivedBytes, uint64_t totalBytes, uint64_t speedBytesPerSec = 0);
+    void setDownloadStatus(int id, DownloadStatus status, const std::string& note = "");
     void finishDownload(int id, DownloadStatus status, const std::string& note = "");
+    void clearCompletedDownloads();
     std::vector<DownloadRecord> getDownloads();
     DownloadRecord getDownloadById(int id);
+    bool hasActiveDownloads();
+
+    // Session restore & recently closed tabs (Ctrl+Shift+T)
+    void saveSessionTabs(const std::vector<std::string>& urls);
+    std::vector<std::string> loadSessionTabs();
+    void pushClosedTab(const std::string& url);
+    std::string popClosedTab();
+
+    // AdBlock statistics
+    uint64_t incrementBlockedAds();
+    uint64_t getBlockedAdsCount();
 
 private:
     void loadUnlocked();
     void saveSettingsUnlocked();
     void saveBookmarksUnlocked();
     void saveHistoryUnlocked();
+    void saveDownloadsUnlocked();
 
     PlatformMutex mtx_;
     std::string baseDir_;
@@ -133,8 +155,9 @@ private:
     std::vector<BookmarkEntry> bookmarks_;
     std::vector<HistoryEntry> history_;
     std::vector<DownloadRecord> downloads_;
+    std::vector<std::string> closedTabs_;
     int nextDownloadId_ = 1;
+    uint64_t blockedAdsCount_ = 0;
 };
 
 }  // namespace litebrowser
-
