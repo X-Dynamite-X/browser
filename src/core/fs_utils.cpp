@@ -223,7 +223,28 @@ std::string joinPath(const std::string& dir, const std::string& name) {
 }
 
 std::string pathToFileUrl(const std::string& pathUtf8) {
-    std::string p = pathUtf8;
+    if (pathUtf8.empty()) return "file:///";
+    std::string absPath = pathUtf8;
+#ifdef _WIN32
+    std::wstring w = utf8ToWide(pathUtf8);
+    wchar_t full[MAX_PATH] = {0};
+    if (GetFullPathNameW(w.c_str(), MAX_PATH, full, nullptr) > 0) {
+        absPath = wideToUtf8(full);
+    }
+#else
+    if (pathUtf8[0] != '/') {
+        char full[4096] = {0};
+        if (realpath(pathUtf8.c_str(), full)) {
+            absPath = full;
+        } else {
+            char cwd[4096] = {0};
+            if (getcwd(cwd, sizeof(cwd))) {
+                absPath = std::string(cwd) + "/" + pathUtf8;
+            }
+        }
+    }
+#endif
+    std::string p = absPath;
     std::replace(p.begin(), p.end(), '\\', '/');
     std::string encoded;
     for (unsigned char c : p) {
@@ -377,6 +398,31 @@ std::string base64Encode(const uint8_t* data, size_t len) {
         out.push_back(kTable[(v >> 12) & 0x3F]);
         out.push_back((i + 1 < len) ? kTable[(v >> 6) & 0x3F] : '=');
         out.push_back((i + 2 < len) ? kTable[v & 0x3F] : '=');
+    }
+    return out;
+}
+
+std::vector<uint8_t> base64Decode(const std::string& in) {
+    std::vector<uint8_t> out;
+    out.reserve((in.size() * 3) / 4);
+    uint32_t val = 0;
+    int valb = -8;
+    for (unsigned char c : in) {
+        int d = -1;
+        if (c >= 'A' && c <= 'Z') d = c - 'A';
+        else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') d = c - '0' + 52;
+        else if (c == '+') d = 62;
+        else if (c == '/') d = 63;
+        else if (c == '=') break;
+        if (d != -1) {
+            val = (val << 6) | d;
+            valb += 6;
+            if (valb >= 0) {
+                out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+                valb -= 8;
+            }
+        }
     }
     return out;
 }

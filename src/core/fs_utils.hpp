@@ -33,6 +33,7 @@ void cleanupTempSessionDir();
 
 // Encoding & string helpers
 std::string base64Encode(const uint8_t* data, size_t len);
+std::vector<uint8_t> base64Decode(const std::string& in);
 std::string htmlEscape(const std::string& text);
 std::string urlEncode(const std::string& text);
 std::string urlDecode(const std::string& text);

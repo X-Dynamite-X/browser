@@ -5,6 +5,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -264,8 +265,15 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
     bool inRun = false;
     bool inText = false;
     bool inTable = false;
+    bool inTc = false;
+    int cellColSpan = 1;
+    bool cellVMergeContinue = false;
+    std::string cellBgColor;
     bool paraBidi = false;
     bool paraIsList = false;
+    int curNumId = 0;
+    int curIlvl = 0;
+    std::map<std::pair<int, int>, int> listCounters;
     std::string paraStyle;
     std::string paraAlign;
     std::string paraHtml;
@@ -302,9 +310,17 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
         else if (paraAlign == "both" || paraAlign == "distribute") css += "text-align:justify;";
 
         if (paraIsList) {
+            std::string marker = "&#8226; ";
+            if (curNumId > 0) {
+                int count = ++listCounters[{curNumId, curIlvl}];
+                marker = std::to_string(count) + ". ";
+            }
+            if (curIlvl > 0) {
+                css += "margin-right:" + std::to_string(curIlvl * 24) + "px;margin-left:" + std::to_string(curIlvl * 24) + "px;";
+            }
             res.bodyHtml += "<div class=\"doc-list-item\"" + attrs;
             if (!css.empty()) res.bodyHtml += " style=\"" + css + "\"";
-            res.bodyHtml += ">&#8226; " + (paraHtml.empty() ? std::string("&nbsp;") : paraHtml) + "</div>\n";
+            res.bodyHtml += ">" + marker + (paraHtml.empty() ? std::string("&nbsp;") : paraHtml) + "</div>\n";
         } else {
             res.bodyHtml += "<" + tag + attrs;
             if (!css.empty()) res.bodyHtml += " style=\"" + css + "\"";
@@ -317,6 +333,8 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
         paraAlign.clear();
         paraBidi = false;
         paraIsList = false;
+        curNumId = 0;
+        curIlvl = 0;
     };
 
     for (const auto& tok : tokens) {
@@ -360,12 +378,33 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
             } else if (local == "tr" && inTable) {
                 res.bodyHtml += "<tr>";
             } else if (local == "tc" && inTable) {
-                res.bodyHtml += "<td>";
+                inTc = true;
+                cellColSpan = 1;
+                cellBgColor.clear();
+                cellVMergeContinue = false;
+            } else if (local == "gridSpan" && inTc) {
+                cellColSpan = std::max(1, std::atoi(getAttrAnyNs(tok.attrs, "val").c_str()));
+            } else if (local == "vMerge" && inTc) {
+                std::string v = getAttrAnyNs(tok.attrs, "val");
+                if (v.empty() || v == "continue") cellVMergeContinue = true;
+            } else if (local == "shd" && inTc) {
+                std::string f = getAttrAnyNs(tok.attrs, "fill");
+                if (!f.empty() && f != "auto") cellBgColor = f;
             } else if (local == "p") {
+                if (inTc && !cellVMergeContinue) {
+                    std::string tdTag = "<td";
+                    if (cellColSpan > 1) tdTag += " colspan=\"" + std::to_string(cellColSpan) + "\"";
+                    if (!cellBgColor.empty()) tdTag += " style=\"background-color:#" + fs::htmlEscape(cellBgColor) + ";\"";
+                    tdTag += ">";
+                    res.bodyHtml += tdTag;
+                    inTc = false;
+                }
                 flushParagraph();
                 inParagraph = true;
                 paraBidi = false;
                 paraIsList = false;
+                curNumId = 0;
+                curIlvl = 0;
                 paraStyle.clear();
                 paraAlign.clear();
                 paraHtml.clear();
@@ -379,6 +418,10 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
                 paraAlign = getAttrAnyNs(tok.attrs, "val");
             } else if (local == "numPr" && inParagraph) {
                 paraIsList = true;
+            } else if (local == "numId" && inParagraph) {
+                curNumId = std::atoi(getAttrAnyNs(tok.attrs, "val").c_str());
+            } else if (local == "ilvl" && inParagraph) {
+                curIlvl = std::atoi(getAttrAnyNs(tok.attrs, "val").c_str());
             } else if (local == "r" && inParagraph) {
                 inRun = true;
                 runState = RunState{};
@@ -423,9 +466,21 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
                     if (relPath.compare(0, 5, "word/") != 0) relPath = "word/" + relPath;
                     std::vector<uint8_t> imgBytes;
                     if (zip.extractEntry(relPath, imgBytes) && !imgBytes.empty() && imgBytes.size() <= 8 * 1024 * 1024) {
-                        std::string mime = guessImageMime(relPath);
-                        std::string b64 = fs::base64Encode(imgBytes.data(), imgBytes.size());
-                        paraHtml += "<div class=\"doc-img-box\"><img src=\"data:" + mime + ";base64," + b64 + "\" alt=\"صورة مضمنة\"/></div>";
+                        if (imgBytes.size() <= 16 * 1024) {
+                            std::string mime = guessImageMime(relPath);
+                            std::string b64 = fs::base64Encode(imgBytes.data(), imgBytes.size());
+                            paraHtml += "<div class=\"doc-img-box\"><img src=\"data:" + mime + ";base64," + b64 + "\" alt=\"صورة مضمنة\"/></div>";
+                        } else {
+                            static int g_docxImgSeq = 0;
+                            std::string ext = fs::getExtensionLower(relPath);
+                            if (ext.empty()) ext = ".png";
+                            std::string fName = "docx_img_" + std::to_string(++g_docxImgSeq) + ext;
+                            std::string diskPath = fs::joinPath(fs::getTempSessionDir(), fName);
+                            if (fs::writeFileBytes(diskPath, imgBytes.data(), imgBytes.size())) {
+                                std::string fileUrl = fs::pathToFileUrl(diskPath);
+                                paraHtml += "<div class=\"doc-img-box\"><img src=\"" + fs::htmlEscape(fileUrl) + "\" alt=\"صورة مضمنة\"/></div>";
+                            }
+                        }
                     }
                 }
             }
@@ -444,8 +499,19 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
             } else if (local == "p") {
                 flushParagraph();
             } else if (local == "tc" && inTable) {
+                if (inTc && !cellVMergeContinue) {
+                    std::string tdTag = "<td";
+                    if (cellColSpan > 1) tdTag += " colspan=\"" + std::to_string(cellColSpan) + "\"";
+                    if (!cellBgColor.empty()) tdTag += " style=\"background-color:#" + fs::htmlEscape(cellBgColor) + ";\"";
+                    tdTag += ">";
+                    res.bodyHtml += tdTag;
+                    inTc = false;
+                }
                 flushParagraph();
-                res.bodyHtml += "</td>";
+                if (!cellVMergeContinue) {
+                    res.bodyHtml += "</td>";
+                }
+                cellVMergeContinue = false;
             } else if (local == "tr" && inTable) {
                 res.bodyHtml += "</tr>\n";
             } else if (local == "tbl") {
@@ -456,6 +522,83 @@ DocxParseResult parseDocxFile(const std::string& filePathUtf8) {
     }
 
     flushParagraph();
+
+    // Parse footnotes if present
+    std::string fnXml;
+    if (zip.extractEntryText("word/footnotes.xml", fnXml)) {
+        auto fnTokens = tokenizeXml(fnXml);
+        std::vector<std::string> footnotes;
+        std::string curFn;
+        bool inFn = false, inFnT = false;
+        for (const auto& t : fnTokens) {
+            std::string loc = localTagName(t.name);
+            if (t.type == XmlToken::OpenTag && loc == "footnote") {
+                std::string typeVal = getAttrAnyNs(t.attrs, "type");
+                if (typeVal.empty() || typeVal == "normal") {
+                    inFn = true;
+                    curFn.clear();
+                }
+            } else if (t.type == XmlToken::CloseTag && loc == "footnote") {
+                if (inFn && !fs::trim(curFn).empty()) {
+                    footnotes.push_back(fs::trim(curFn));
+                }
+                inFn = false;
+            } else if (t.type == XmlToken::OpenTag && loc == "t") {
+                inFnT = true;
+            } else if (t.type == XmlToken::CloseTag && loc == "t") {
+                inFnT = false;
+            } else if (t.type == XmlToken::Text && inFn && inFnT) {
+                curFn += t.text;
+            }
+        }
+        if (!footnotes.empty()) {
+            res.bodyHtml += "<div class=\"doc-footnotes\" style=\"margin-top:28px;padding-top:14px;border-top:2px dashed #cbd5e1;\">\n";
+            res.bodyHtml += "<h4 style=\"margin-bottom:8px;\">الهوامش والحواشي السفلية:</h4>\n<ol style=\"font-size:13px;color:#475569;\">\n";
+            for (const auto& fn : footnotes) {
+                res.bodyHtml += "<li>" + fs::htmlEscape(fn) + "</li>\n";
+            }
+            res.bodyHtml += "</ol></div>\n";
+        }
+    }
+
+    // Parse header if present
+    std::string hdrXml;
+    if (zip.extractEntryText("word/header1.xml", hdrXml)) {
+        auto hdrTokens = tokenizeXml(hdrXml);
+        std::string hdrText;
+        bool inHdrT = false;
+        for (const auto& t : hdrTokens) {
+            std::string loc = localTagName(t.name);
+            if (t.type == XmlToken::OpenTag && loc == "t") inHdrT = true;
+            else if (t.type == XmlToken::CloseTag && loc == "t") inHdrT = false;
+            else if (t.type == XmlToken::Text && inHdrT) hdrText += t.text;
+        }
+        std::string trimmedHdr = fs::trim(hdrText);
+        if (!trimmedHdr.empty()) {
+            res.bodyHtml = "<div class=\"doc-header-strip\" style=\"padding-bottom:8px;margin-bottom:14px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;\">" +
+                           fs::htmlEscape(trimmedHdr) + "</div>\n" + res.bodyHtml;
+        }
+    }
+
+    // Parse footer if present
+    std::string ftrXml;
+    if (zip.extractEntryText("word/footer1.xml", ftrXml)) {
+        auto ftrTokens = tokenizeXml(ftrXml);
+        std::string ftrText;
+        bool inFtrT = false;
+        for (const auto& t : ftrTokens) {
+            std::string loc = localTagName(t.name);
+            if (t.type == XmlToken::OpenTag && loc == "t") inFtrT = true;
+            else if (t.type == XmlToken::CloseTag && loc == "t") inFtrT = false;
+            else if (t.type == XmlToken::Text && inFtrT) ftrText += t.text;
+        }
+        std::string trimmedFtr = fs::trim(ftrText);
+        if (!trimmedFtr.empty()) {
+            res.bodyHtml += "<div class=\"doc-footer-strip\" style=\"margin-top:20px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;text-align:center;\">" +
+                            fs::htmlEscape(trimmedFtr) + "</div>\n";
+        }
+    }
+
     res.wordCount = countWordsUtf8(res.plainText);
     res.ok = true;
     return res;

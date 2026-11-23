@@ -16,6 +16,7 @@ set(LITEBROWSER_CORE_SOURCES
     src/core/url_utils.cpp
     src/core/storage.cpp
     src/core/internal_pages.cpp
+    src/core/downloader.cpp
 )
 
 add_library(litebrowser_core STATIC ${LITEBROWSER_CORE_SOURCES})
@@ -26,7 +27,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-    add_executable(litebrowser WIN32 src/platform/win32_main.cpp)
+    enable_language(RC)
+    add_executable(litebrowser WIN32 src/platform/win32_main.cpp src/platform/resources.rc)
     target_link_libraries(litebrowser PRIVATE
         litebrowser_core
         comctl32

@@ -17,7 +17,9 @@ bool isSupportedDocumentFile(const std::string& pathOrUrl);
 // Renders .pdf, .docx, .doc, .rtf, .txt, .md into a standalone HTML reader view
 // and writes a session temp file so any engine (WebKit2GTK, Miniblink, WebView2, WinXP MSHTML)
 // can load even multi-megabyte documents with zero URL-length limits.
-DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slotId = 0);
+DocumentViewOutput renderDocumentToHtml(const std::string& filePathUtf8, int slotId = 0,
+                                        const std::string& theme = "dark",
+                                        const std::string& lang = "ar");
 
 }  // namespace litebrowser
 

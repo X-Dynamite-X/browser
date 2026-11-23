@@ -4,9 +4,12 @@
 #include "fs_utils.hpp"
 
 #include <cctype>
+#include <sstream>
 #include <vector>
 
 namespace litebrowser {
+
+static std::vector<std::string> g_customBlockedHosts;
 
 namespace {
 
@@ -152,6 +155,14 @@ bool shouldBlockAdOrTracker(const std::string& requestUrl) {
             return true;
         }
     }
+    for (const auto& d : g_customBlockedHosts) {
+        if (host == d) return true;
+        if (host.size() > d.size() &&
+            host.compare(host.size() - d.size(), d.size(), d) == 0 &&
+            host[host.size() - d.size() - 1] == '.') {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -161,6 +172,42 @@ bool isDirectDownloadExtension(const std::string& urlOrPath) {
             ext == ".7z" || ext == ".tar" || ext == ".gz" || ext == ".bz2" ||
             ext == ".xz" || ext == ".deb" || ext == ".rpm" || ext == ".appimage" ||
             ext == ".iso" || ext == ".apk" || ext == ".dmg");
+}
+
+void loadCustomAdblockRules(const std::string& filePathUtf8) {
+    std::string text;
+    if (!fs::readFileText(filePathUtf8, text)) return;
+    std::string line;
+    std::istringstream iss(text);
+    while (std::getline(iss, line)) {
+        line = fs::trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == '!') continue;
+        if (line.find("127.0.0.1 ") == 0 || line.find("0.0.0.0 ") == 0) {
+            size_t sp = line.find(' ');
+            line = fs::trim(line.substr(sp + 1));
+        }
+        if (!line.empty()) {
+            g_customBlockedHosts.push_back(fs::toLowerAscii(line));
+        }
+    }
+}
+
+bool isRemoteDocumentUrl(const std::string& url) {
+    if (!fs::startsWithIgnoreCase(url, "http://") && !fs::startsWithIgnoreCase(url, "https://")) {
+        return false;
+    }
+    std::string ext = fs::getExtensionLower(url);
+    return (ext == ".pdf" || ext == ".docx" || ext == ".doc" || ext == ".rtf");
+}
+
+SecurityLevel getUrlSecurityLevel(const std::string& url) {
+    if (fs::startsWithIgnoreCase(url, "https://")) {
+        return SecurityLevel::SecureHttps;
+    }
+    if (fs::startsWithIgnoreCase(url, "http://")) {
+        return SecurityLevel::InsecureHttp;
+    }
+    return SecurityLevel::InternalSafe;
 }
 
 }  // namespace litebrowser

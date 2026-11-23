@@ -134,9 +134,25 @@ void testStorageAndInternalPages() {
     auto home = litebrowser::renderInternalPage("lite://home", st, 1);
     auto games = litebrowser::renderInternalPage("lite://games", st, 2);
     auto dlPage = litebrowser::renderInternalPage("lite://downloads", st, 3);
+    auto settingsPage = litebrowser::renderInternalPage("lite://settings", st, 4);
     check(home.html.find("متصفح النور الخفيف") != std::string::npos, "lite://home page rendered");
     check(games.html.find("startGame('snake')") != std::string::npos, "lite://games built-in HTML5 games rendered");
     check(dlPage.html.find("setup.exe") != std::string::npos, "lite://downloads lists downloaded program");
+    check(settingsPage.html.find("إعدادات متصفح النور الخفيف") != std::string::npos, "lite://settings page rendered");
+
+    // Session tabs test
+    st.saveSessionTabs({"https://example.com", "https://google.com"});
+    auto restored = st.loadSessionTabs();
+    check(restored.size() == 2 && restored[0] == "https://example.com", "Session tabs saved and restored");
+
+    // Closed tab stack test (Ctrl+Shift+T)
+    st.pushClosedTab("https://closed.site.org");
+    check(st.popClosedTab() == "https://closed.site.org", "Recently closed tab popped");
+
+    // Security level and remote document check
+    check(litebrowser::getUrlSecurityLevel("https://secure.com") == litebrowser::SecurityLevel::SecureHttps, "HTTPS marked secure");
+    check(litebrowser::getUrlSecurityLevel("http://plain.com") == litebrowser::SecurityLevel::InsecureHttp, "HTTP marked insecure");
+    check(litebrowser::isRemoteDocumentUrl("https://example.org/report.pdf"), "PDF remote URL detected for direct reader opening");
 }
 
 }  // namespace
