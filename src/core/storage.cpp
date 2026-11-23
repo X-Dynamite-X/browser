@@ -71,6 +71,8 @@ void StorageManager::loadUnlocked() {
             else if (k == "restore_session") settings_.restoreSessionOnStartup = (v == "1" || v == "true");
             else if (k == "search_engine" && !v.empty()) settings_.searchEngine = v;
             else if (k == "home_page" && !v.empty()) settings_.homePage = v;
+            else if (k == "theme" && !v.empty()) settings_.theme = v;
+            else if (k == "language" && !v.empty()) settings_.language = v;
             else if (k == "blocked_ads") blockedAdsCount_ = std::strtoull(v.c_str(), nullptr, 10);
         }
     }
@@ -161,6 +163,8 @@ void StorageManager::saveSettingsUnlocked() {
     out += std::string("restore_session=") + (settings_.restoreSessionOnStartup ? "1" : "0") + "\n";
     out += "search_engine=" + sanitizeField(settings_.searchEngine) + "\n";
     out += "home_page=" + sanitizeField(settings_.homePage) + "\n";
+    out += "theme=" + sanitizeField(settings_.theme) + "\n";
+    out += "language=" + sanitizeField(settings_.language) + "\n";
     out += "blocked_ads=" + std::to_string(blockedAdsCount_) + "\n";
     fs::writeFileText(fs::joinPath(baseDir_, "settings.conf"), out);
 }

@@ -102,6 +102,11 @@ struct BrowserSettings {
     bool restoreSessionOnStartup = false;  // استعادة التبويبات المفتوحة عند التشغيل
     std::string searchEngine = "google";   // google | ddg | ddg-lite | bing | youtube
     std::string homePage = "lite://home";
+    std::string theme = "dark";            // "dark" | "light"
+    std::string language = "ar";           // "ar" | "en"
+
+    bool isDarkMode() const { return theme != "light"; }
+    bool isEnglish() const { return language == "en"; }
 };
 
 class StorageManager {

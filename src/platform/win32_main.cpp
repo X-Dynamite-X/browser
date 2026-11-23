@@ -30,6 +30,7 @@
 #include "../core/document_viewer.hpp"
 #include "../core/downloader.hpp"
 #include "../core/fs_utils.hpp"
+#include "../core/i18n.hpp"
 #include "../core/internal_pages.hpp"
 #include "../core/storage.hpp"
 #include "../core/url_utils.hpp"
@@ -234,6 +235,8 @@ enum ControlIds {
     ID_BTN_DOWNLOADS,
     ID_BTN_SETTINGS,
     ID_BTN_LITE,
+    ID_BTN_THEME,
+    ID_BTN_LANG,
     ID_BTN_NEWTAB,
     ID_BTN_CLOSETAB,
     ID_TABCTRL,
@@ -569,6 +572,7 @@ struct WinBrowserApp {
     HWND btnBack = nullptr, btnFwd = nullptr, btnReload = nullptr, btnHome = nullptr;
     HWND editUrl = nullptr, btnGo = nullptr, btnStar = nullptr;
     HWND btnOpenDoc = nullptr, btnGames = nullptr, btnDownloads = nullptr, btnSettings = nullptr, btnLite = nullptr;
+    HWND btnTheme = nullptr, btnLang = nullptr;
     HWND btnNewTab = nullptr, btnCloseTab = nullptr;
     HWND tabCtrl = nullptr;
     HWND statusWnd = nullptr;
@@ -582,6 +586,7 @@ struct WinBrowserApp {
 
     // In-Page Find Bar
     HWND findBarWnd = nullptr;
+    HWND lblFind = nullptr;
     HWND editFind = nullptr;
     HWND btnFindPrev = nullptr;
     HWND btnFindNext = nullptr;
@@ -607,6 +612,39 @@ void setWinStatus(const std::string& utf8Msg) {
     if (!g_app || !g_app->statusWnd) return;
     std::wstring w = litebrowser::fs::utf8ToWide(utf8Msg);
     SetWindowTextW(g_app->statusWnd, w.c_str());
+}
+
+void updateWinUiLocalization(WinBrowserApp* app) {
+    if (!app) return;
+    auto s = app->storage.getSettings();
+    std::string lang = s.language.empty() ? "ar" : s.language;
+    bool en = (lang == "en");
+
+    if (app->mainWnd) {
+        SetWindowTextW(app->mainWnd, litebrowser::fs::utf8ToWide(litebrowser::i18n::get("app_title", lang)).c_str());
+    }
+    if (app->btnHome) SetWindowTextW(app->btnHome, L"🏠");
+    if (app->btnGo) SetWindowTextW(app->btnGo, en ? L"Go" : L"اذهب");
+    if (app->btnOpenDoc) SetWindowTextW(app->btnOpenDoc, en ? L"📄 Docs" : L"📄 مستندات");
+    if (app->btnGames) SetWindowTextW(app->btnGames, en ? L"🎮 Games" : L"🎮 ألعاب");
+    if (app->btnDownloads) SetWindowTextW(app->btnDownloads, en ? L"⬇ Downloads" : L"⬇ تحميلات");
+    if (app->btnSettings) SetWindowTextW(app->btnSettings, en ? L"⚙ Settings" : L"⚙ إعدادات");
+    if (app->btnLite) SetWindowTextW(app->btnLite, s.liteMode ? (en ? L"⚡ Lite: ON" : L"⚡ خفيف: نشط") : (en ? L"⚡ Lite" : L"⚡ وضع خفيف"));
+    if (app->btnTheme) SetWindowTextW(app->btnTheme, s.isDarkMode() ? L"☀️" : L"🌙");
+    if (app->btnLang) SetWindowTextW(app->btnLang, en ? L"🌐 ع" : L"🌐 En");
+    if (app->editUrl) {
+        std::wstring ph = litebrowser::fs::utf8ToWide(litebrowser::i18n::get("search_placeholder", lang));
+        SendMessageW(app->editUrl, 0x1501 /* EM_SETCUEBANNER */, FALSE, reinterpret_cast<LPARAM>(ph.c_str()));
+    }
+    if (app->lblFind) {
+        SetWindowTextW(app->lblFind, litebrowser::fs::utf8ToWide(litebrowser::i18n::get("find_label", lang)).c_str());
+    }
+    if (app->btnFindPrev) {
+        SetWindowTextW(app->btnFindPrev, litebrowser::fs::utf8ToWide(litebrowser::i18n::get("find_prev", lang)).c_str());
+    }
+    if (app->btnFindNext) {
+        SetWindowTextW(app->btnFindNext, litebrowser::fs::utf8ToWide(litebrowser::i18n::get("find_next", lang)).c_str());
+    }
 }
 
 std::string makeUniqueWinDownloadPath(const std::string& rawName) {
@@ -701,9 +739,23 @@ void handleWinLiteAction(WinTab* tab, const std::string& actionUri) {
         auto s = g_app->storage.getSettings();
         s.liteMode = !s.liteMode;
         g_app->storage.updateSettings(s);
-        SetWindowTextW(g_app->btnLite, s.liteMode ? L"خفيف: نشط" : L"وضع خفيف");
+        SetWindowTextW(g_app->btnLite, s.liteMode ? (s.isEnglish() ? L"⚡ Lite: ON" : L"⚡ خفيف: نشط") : (s.isEnglish() ? L"⚡ Lite" : L"⚡ وضع خفيف"));
         if (s.liteMode) trimProcessWorkingSet();
         setWinStatus(s.liteMode ? "تم تفعيل الوضع الخفيف لتوفير الذاكرة" : "تم التبديل للوضع الكامل");
+        navigateWinTab(tab, tab->logicalUrl);
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-theme")) {
+        auto s = g_app->storage.getSettings();
+        s.theme = s.isDarkMode() ? "light" : "dark";
+        g_app->storage.updateSettings(s);
+        updateWinUiLocalization(g_app);
+        setWinStatus(s.isDarkMode() ? litebrowser::i18n::get("dark_mode", s.language) : litebrowser::i18n::get("light_mode", s.language));
+        navigateWinTab(tab, tab->logicalUrl);
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-lang")) {
+        auto s = g_app->storage.getSettings();
+        s.language = s.isEnglish() ? "ar" : "en";
+        g_app->storage.updateSettings(s);
+        updateWinUiLocalization(g_app);
+        setWinStatus(s.isEnglish() ? "Language switched to English" : "تم تغيير اللغة إلى العربية");
         navigateWinTab(tab, tab->logicalUrl);
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-adblock")) {
         auto s = g_app->storage.getSettings();
@@ -779,8 +831,14 @@ void handleWinLiteAction(WinTab* tab, const std::string& actionUri) {
             layoutWinChildren();
         } else if (key == "lite-mode") {
             s.liteMode = (val == "1" || val == "true");
-            SetWindowTextW(g_app->btnLite, s.liteMode ? L"خفيف: نشط" : L"وضع خفيف");
+            SetWindowTextW(g_app->btnLite, s.liteMode ? (s.isEnglish() ? L"⚡ Lite: ON" : L"⚡ خفيف: نشط") : (s.isEnglish() ? L"⚡ Lite" : L"⚡ وضع خفيف"));
             if (s.liteMode) trimProcessWorkingSet();
+        } else if (key == "theme") {
+            s.theme = val;
+            updateWinUiLocalization(g_app);
+        } else if (key == "lang" || key == "language") {
+            s.language = val;
+            updateWinUiLocalization(g_app);
         }
 
         g_app->storage.updateSettings(s);
@@ -999,7 +1057,8 @@ void navigateWinTab(WinTab* tab, const std::string& rawInput) {
         int targetTabId = tab->tabId;
         std::string path = resolved.targetUrlOrPath;
         std::thread([targetTabId, path]() {
-            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId);
+            auto s = g_app->storage.getSettings();
+            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId, s.theme, s.language);
             auto* res = new AsyncDocResult{ targetTabId, path, std::move(doc) };
             if (g_app && g_app->mainWnd) {
                 PostMessageW(g_app->mainWnd, WM_DOC_LOADED, 0, reinterpret_cast<LPARAM>(res));
@@ -1229,23 +1288,25 @@ void layoutWinChildren() {
     const int btnH = 28;
     int x = 6;
 
-    MoveWindow(g_app->btnBack, x, topY, 32, btnH, TRUE); x += 35;
-    MoveWindow(g_app->btnFwd, x, topY, 32, btnH, TRUE); x += 35;
-    MoveWindow(g_app->btnReload, x, topY, 32, btnH, TRUE); x += 35;
-    MoveWindow(g_app->btnHome, x, topY, 56, btnH, TRUE); x += 60;
+    MoveWindow(g_app->btnBack, x, topY, 30, btnH, TRUE); x += 32;
+    MoveWindow(g_app->btnFwd, x, topY, 30, btnH, TRUE); x += 32;
+    MoveWindow(g_app->btnReload, x, topY, 30, btnH, TRUE); x += 32;
+    MoveWindow(g_app->btnHome, x, topY, 34, btnH, TRUE); x += 36;
 
-    int rightButtonsWidth = 40 + 34 + 86 + 62 + 74 + 70 + 80 + 62 + 34 + 30;
-    int urlW = std::max(120, w - x - rightButtonsWidth);
+    int rightButtonsWidth = 38 + 30 + 82 + 60 + 74 + 68 + 84 + 30 + 44 + 28 + 28 + 32;
+    int urlW = std::max(100, w - x - rightButtonsWidth);
     MoveWindow(g_app->editUrl, x, topY + 2, urlW, btnH - 4, TRUE); x += urlW + 4;
-    MoveWindow(g_app->btnGo, x, topY, 38, btnH, TRUE); x += 41;
-    MoveWindow(g_app->btnStar, x, topY, 32, btnH, TRUE); x += 35;
-    MoveWindow(g_app->btnOpenDoc, x, topY, 84, btnH, TRUE); x += 87;
-    MoveWindow(g_app->btnGames, x, topY, 60, btnH, TRUE); x += 63;
-    MoveWindow(g_app->btnDownloads, x, topY, 72, btnH, TRUE); x += 75;
-    MoveWindow(g_app->btnSettings, x, topY, 68, btnH, TRUE); x += 71;
-    MoveWindow(g_app->btnLite, x, topY, 78, btnH, TRUE); x += 81;
-    MoveWindow(g_app->btnNewTab, x, topY, 58, btnH, TRUE); x += 61;
-    MoveWindow(g_app->btnCloseTab, x, topY, 30, btnH, TRUE);
+    MoveWindow(g_app->btnGo, x, topY, 38, btnH, TRUE); x += 40;
+    MoveWindow(g_app->btnStar, x, topY, 30, btnH, TRUE); x += 32;
+    MoveWindow(g_app->btnOpenDoc, x, topY, 82, btnH, TRUE); x += 84;
+    MoveWindow(g_app->btnGames, x, topY, 60, btnH, TRUE); x += 62;
+    MoveWindow(g_app->btnDownloads, x, topY, 74, btnH, TRUE); x += 76;
+    MoveWindow(g_app->btnSettings, x, topY, 68, btnH, TRUE); x += 70;
+    MoveWindow(g_app->btnLite, x, topY, 84, btnH, TRUE); x += 86;
+    MoveWindow(g_app->btnTheme, x, topY, 30, btnH, TRUE); x += 32;
+    MoveWindow(g_app->btnLang, x, topY, 44, btnH, TRUE); x += 46;
+    MoveWindow(g_app->btnNewTab, x, topY, 28, btnH, TRUE); x += 30;
+    MoveWindow(g_app->btnCloseTab, x, topY, 28, btnH, TRUE);
 
     int curY = 38;
     if (g_app->bookmarksBarVisible) {
@@ -1420,6 +1481,12 @@ LRESULT CALLBACK mainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case ID_BTN_LITE:
                     if (cur) handleWinLiteAction(cur, "lite-action://toggle-lite");
                     break;
+                case ID_BTN_THEME:
+                    if (cur) handleWinLiteAction(cur, "lite-action://toggle-theme");
+                    break;
+                case ID_BTN_LANG:
+                    if (cur) handleWinLiteAction(cur, "lite-action://toggle-lang");
+                    break;
                 case ID_BTN_NEWTAB:
                 case ID_ACCEL_NEWTAB:
                     createWinTab("lite://home", true);
@@ -1576,10 +1643,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 780,
         nullptr, nullptr, hInstance, nullptr);
 
+    OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    GetVersionExW(&vi);
+    const wchar_t* preferredFont = (vi.dwMajorVersion >= 6) ? L"Segoe UI" : L"Tahoma";
+
     app.uiFont = CreateFontW(
-        -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+        DEFAULT_PITCH | FF_SWISS, preferredFont);
 
     auto makeBtn = [&](const wchar_t* text, int id) -> HWND {
         HWND h = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1588,27 +1660,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         return h;
     };
 
-    app.btnBack = makeBtn(L"<", ID_BTN_BACK);
-    app.btnFwd = makeBtn(L">", ID_BTN_FWD);
+    app.btnBack = makeBtn(L"◀", ID_BTN_BACK);
+    app.btnFwd = makeBtn(L"▶", ID_BTN_FWD);
     app.btnReload = makeBtn(L"↻", ID_BTN_RELOAD);
-    app.btnHome = makeBtn(L"الرئيسية", ID_BTN_HOME);
+    app.btnHome = makeBtn(L"🏠", ID_BTN_HOME);
 
     app.editUrl = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
         0, 0, 300, 24, app.mainWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDIT_URL)), hInstance, nullptr);
     SendMessageW(app.editUrl, WM_SETFONT, reinterpret_cast<WPARAM>(app.uiFont), TRUE);
+    // Set cue banner (placeholder) if supported (WinXP SP2+ with comctl32 v6)
+    SendMessageW(app.editUrl, 0x1501 /* EM_SETCUEBANNER */, FALSE,
+                 reinterpret_cast<LPARAM>(L"ابحث في الإنترنت أو أدخل رابط موقع أو مسار ملف PDF/Word..."));
     app.origEditProc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrW(app.editUrl, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(urlEditSubclassProc)));
 
     app.btnGo = makeBtn(L"اذهب", ID_BTN_GO);
     app.btnStar = makeBtn(L"☆", ID_BTN_STAR);
-    app.btnOpenDoc = makeBtn(L"PDF/Word", ID_BTN_OPENDOC);
-    app.btnGames = makeBtn(L"ألعاب", ID_BTN_GAMES);
-    app.btnDownloads = makeBtn(L"التحميلات", ID_BTN_DOWNLOADS);
-    app.btnSettings = makeBtn(L"الإعدادات", ID_BTN_SETTINGS);
+    app.btnOpenDoc = makeBtn(L"📄 مستندات", ID_BTN_OPENDOC);
+    app.btnGames = makeBtn(L"🎮 ألعاب", ID_BTN_GAMES);
+    app.btnDownloads = makeBtn(L"⬇ تحميلات", ID_BTN_DOWNLOADS);
+    app.btnSettings = makeBtn(L"⚙ إعدادات", ID_BTN_SETTINGS);
     auto initS = app.storage.getSettings();
-    app.btnLite = makeBtn(initS.liteMode ? L"خفيف: نشط" : L"وضع خفيف", ID_BTN_LITE);
-    app.btnNewTab = makeBtn(L"+ تبويب", ID_BTN_NEWTAB);
+    app.btnLite = makeBtn(initS.liteMode ? L"⚡ خفيف: نشط" : L"⚡ وضع خفيف", ID_BTN_LITE);
+    app.btnTheme = makeBtn(initS.isDarkMode() ? L"☀️" : L"🌙", ID_BTN_THEME);
+    app.btnLang = makeBtn(initS.isEnglish() ? L"🌐 ع" : L"🌐 En", ID_BTN_LANG);
+    app.btnNewTab = makeBtn(L"+", ID_BTN_NEWTAB);
     app.btnCloseTab = makeBtn(L"×", ID_BTN_CLOSETAB);
 
     // Bookmarks Bar Container
@@ -1625,6 +1702,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         0, L"STATIC", L"البحث في الصفحة:", WS_CHILD | WS_VISIBLE,
         6, 5, 120, 20, app.findBarWnd, nullptr, hInstance, nullptr);
     SendMessageW(lblFind, WM_SETFONT, reinterpret_cast<WPARAM>(app.uiFont), TRUE);
+    app.lblFind = lblFind;
 
     app.editFind = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -1680,6 +1758,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     HACCEL hAccel = CreateAcceleratorTableW(accels, sizeof(accels) / sizeof(accels[0]));
 
     refreshWinBookmarksBar();
+    updateWinUiLocalization(&app);
 
     // Check command-line file/URL argument or session restore
     int numArgs = 0;

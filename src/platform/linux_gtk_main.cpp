@@ -1,6 +1,7 @@
 #include "../core/document_viewer.hpp"
 #include "../core/downloader.hpp"
 #include "../core/fs_utils.hpp"
+#include "../core/i18n.hpp"
 #include "../core/internal_pages.hpp"
 #include "../core/storage.hpp"
 #include "../core/url_utils.hpp"
@@ -186,8 +187,17 @@ struct BrowserApp {
     GtkWidget* urlEntry = nullptr;
     GtkWidget* btnBack = nullptr;
     GtkWidget* btnForward = nullptr;
+    GtkWidget* btnReload = nullptr;
+    GtkWidget* btnHome = nullptr;
     GtkWidget* btnBookmark = nullptr;
+    GtkWidget* btnOpenDoc = nullptr;
+    GtkWidget* btnGames = nullptr;
+    GtkWidget* btnDownloads = nullptr;
+    GtkWidget* btnSettings = nullptr;
     GtkWidget* btnLiteMode = nullptr;
+    GtkWidget* btnTheme = nullptr;
+    GtkWidget* btnLang = nullptr;
+    GtkWidget* btnNewTab = nullptr;
     GtkWidget* statusLabel = nullptr;
 
     // Bookmarks bar
@@ -196,6 +206,7 @@ struct BrowserApp {
 
     // Find bar (Ctrl+F)
     GtkWidget* findBar = nullptr;
+    GtkWidget* findLbl = nullptr;
     GtkWidget* findEntry = nullptr;
     GtkWidget* btnFindPrev = nullptr;
     GtkWidget* btnFindNext = nullptr;
@@ -263,6 +274,272 @@ void applyEngineSettingsToView(GtkWidget* webView, const litebrowser::BrowserSet
     }
 }
 
+static GtkCssProvider* g_cssProvider = nullptr;
+
+static void applyModernGtkCssTheme(const std::string& theme) {
+    if (!g_cssProvider) {
+        g_cssProvider = gtk_css_provider_new();
+        gtk_style_context_add_provider_for_screen(
+            gdk_screen_get_default(),
+            GTK_STYLE_PROVIDER(g_cssProvider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+
+    bool dark = (theme != "light");
+    const char* darkCss =
+        "window, .background {\n"
+        "  background-color: #090d16;\n"
+        "  color: #f8fafc;\n"
+        "}\n"
+        "#navBar {\n"
+        "  background-color: #0f172a;\n"
+        "  border-bottom: 1px solid #1e293b;\n"
+        "  padding: 6px 8px;\n"
+        "}\n"
+        "#urlEntry, #urlEntry text, entry.url-entry {\n"
+        "  background-color: #0b0f19;\n"
+        "  color: #f8fafc;\n"
+        "  border: 1px solid #334155;\n"
+        "  border-radius: 20px;\n"
+        "  padding: 5px 16px;\n"
+        "  font-size: 13px;\n"
+        "}\n"
+        "#urlEntry:focus, #urlEntry text:focus {\n"
+        "  border-color: #38bdf8;\n"
+        "  background-color: #020617;\n"
+        "}\n"
+        "button {\n"
+        "  background-color: #1e293b;\n"
+        "  color: #f1f5f9;\n"
+        "  border: 1px solid #334155;\n"
+        "  border-radius: 6px;\n"
+        "  padding: 4px 10px;\n"
+        "  font-size: 13px;\n"
+        "  font-weight: 500;\n"
+        "}\n"
+        "button:hover {\n"
+        "  background-color: #334155;\n"
+        "  border-color: #475569;\n"
+        "  color: #ffffff;\n"
+        "}\n"
+        "button:active {\n"
+        "  background-color: #0284c7;\n"
+        "  border-color: #38bdf8;\n"
+        "  color: #ffffff;\n"
+        "}\n"
+        "#btnLiteMode {\n"
+        "  background-color: #0369a1;\n"
+        "  border-color: #38bdf8;\n"
+        "  color: #ffffff;\n"
+        "  font-weight: bold;\n"
+        "  border-radius: 14px;\n"
+        "}\n"
+        "#btnLiteMode:hover {\n"
+        "  background-color: #0284c7;\n"
+        "}\n"
+        "#btnBookmarkActive {\n"
+        "  color: #facc15;\n"
+        "  border-color: #facc15;\n"
+        "}\n"
+        "notebook {\n"
+        "  background-color: #090d16;\n"
+        "}\n"
+        "notebook header {\n"
+        "  background-color: #070a10;\n"
+        "  border-bottom: 1px solid #1e293b;\n"
+        "  padding: 2px 4px 0 4px;\n"
+        "}\n"
+        "notebook tab {\n"
+        "  background-color: #1e293b;\n"
+        "  color: #94a3b8;\n"
+        "  border: 1px solid #334155;\n"
+        "  border-bottom: none;\n"
+        "  border-radius: 6px 6px 0 0;\n"
+        "  padding: 4px 12px;\n"
+        "  margin-right: 2px;\n"
+        "}\n"
+        "notebook tab:hover {\n"
+        "  background-color: #334155;\n"
+        "  color: #f8fafc;\n"
+        "}\n"
+        "notebook tab:checked {\n"
+        "  background-color: #090d16;\n"
+        "  color: #38bdf8;\n"
+        "  border-top: 2px solid #38bdf8;\n"
+        "  font-weight: bold;\n"
+        "}\n"
+        "#bookmarksBar {\n"
+        "  background-color: #090d16;\n"
+        "  border-bottom: 1px solid #1e293b;\n"
+        "  padding: 3px 8px;\n"
+        "}\n"
+        "#bookmarksBar button {\n"
+        "  background-color: #1e293b;\n"
+        "  color: #cbd5e1;\n"
+        "  border: 1px solid #334155;\n"
+        "  border-radius: 12px;\n"
+        "  padding: 2px 10px;\n"
+        "  font-size: 11px;\n"
+        "}\n"
+        "#bookmarksBar button:hover {\n"
+        "  background-color: #334155;\n"
+        "  color: #38bdf8;\n"
+        "  border-color: #38bdf8;\n"
+        "}\n"
+        "#findBar {\n"
+        "  background-color: #1e293b;\n"
+        "  border-radius: 8px;\n"
+        "  border: 1px solid #334155;\n"
+        "  padding: 4px 8px;\n"
+        "}\n"
+        "#statusBar {\n"
+        "  background-color: #070a10;\n"
+        "  border-top: 1px solid #1e293b;\n"
+        "  color: #94a3b8;\n"
+        "  font-size: 12px;\n"
+        "  padding: 3px 10px;\n"
+        "}\n";
+
+    const char* lightCss =
+        "window, .background {\n"
+        "  background-color: #f8fafc;\n"
+        "  color: #0f172a;\n"
+        "}\n"
+        "#navBar {\n"
+        "  background-color: #ffffff;\n"
+        "  border-bottom: 1px solid #e2e8f0;\n"
+        "  padding: 6px 8px;\n"
+        "}\n"
+        "#urlEntry, #urlEntry text, entry.url-entry {\n"
+        "  background-color: #f1f5f9;\n"
+        "  color: #0f172a;\n"
+        "  border: 1px solid #cbd5e1;\n"
+        "  border-radius: 20px;\n"
+        "  padding: 5px 16px;\n"
+        "  font-size: 13px;\n"
+        "}\n"
+        "#urlEntry:focus, #urlEntry text:focus {\n"
+        "  border-color: #0284c7;\n"
+        "  background-color: #ffffff;\n"
+        "}\n"
+        "button {\n"
+        "  background-color: #f1f5f9;\n"
+        "  color: #334155;\n"
+        "  border: 1px solid #cbd5e1;\n"
+        "  border-radius: 6px;\n"
+        "  padding: 4px 10px;\n"
+        "  font-size: 13px;\n"
+        "  font-weight: 500;\n"
+        "}\n"
+        "button:hover {\n"
+        "  background-color: #e2e8f0;\n"
+        "  border-color: #94a3b8;\n"
+        "  color: #0f172a;\n"
+        "}\n"
+        "button:active {\n"
+        "  background-color: #0284c7;\n"
+        "  border-color: #0284c7;\n"
+        "  color: #ffffff;\n"
+        "}\n"
+        "#btnLiteMode {\n"
+        "  background-color: #e0f2fe;\n"
+        "  border-color: #0284c7;\n"
+        "  color: #0284c7;\n"
+        "  font-weight: bold;\n"
+        "  border-radius: 14px;\n"
+        "}\n"
+        "#btnLiteMode:hover {\n"
+        "  background-color: #0284c7;\n"
+        "  color: #ffffff;\n"
+        "}\n"
+        "#btnBookmarkActive {\n"
+        "  color: #d97706;\n"
+        "  border-color: #d97706;\n"
+        "}\n"
+        "notebook {\n"
+        "  background-color: #f8fafc;\n"
+        "}\n"
+        "notebook header {\n"
+        "  background-color: #e2e8f0;\n"
+        "  border-bottom: 1px solid #cbd5e1;\n"
+        "  padding: 2px 4px 0 4px;\n"
+        "}\n"
+        "notebook tab {\n"
+        "  background-color: #f1f5f9;\n"
+        "  color: #64748b;\n"
+        "  border: 1px solid #cbd5e1;\n"
+        "  border-bottom: none;\n"
+        "  border-radius: 6px 6px 0 0;\n"
+        "  padding: 4px 12px;\n"
+        "  margin-right: 2px;\n"
+        "}\n"
+        "notebook tab:hover {\n"
+        "  background-color: #ffffff;\n"
+        "  color: #0f172a;\n"
+        "}\n"
+        "notebook tab:checked {\n"
+        "  background-color: #ffffff;\n"
+        "  color: #0284c7;\n"
+        "  border-top: 2px solid #0284c7;\n"
+        "  font-weight: bold;\n"
+        "}\n"
+        "#bookmarksBar {\n"
+        "  background-color: #f8fafc;\n"
+        "  border-bottom: 1px solid #e2e8f0;\n"
+        "  padding: 3px 8px;\n"
+        "}\n"
+        "#bookmarksBar button {\n"
+        "  background-color: #ffffff;\n"
+        "  color: #475569;\n"
+        "  border: 1px solid #cbd5e1;\n"
+        "  border-radius: 12px;\n"
+        "  padding: 2px 10px;\n"
+        "  font-size: 11px;\n"
+        "}\n"
+        "#bookmarksBar button:hover {\n"
+        "  background-color: #e0f2fe;\n"
+        "  color: #0284c7;\n"
+        "  border-color: #0284c7;\n"
+        "}\n"
+        "#findBar {\n"
+        "  background-color: #ffffff;\n"
+        "  border-radius: 8px;\n"
+        "  border: 1px solid #cbd5e1;\n"
+        "  padding: 4px 8px;\n"
+        "}\n"
+        "#statusBar {\n"
+        "  background-color: #ffffff;\n"
+        "  border-top: 1px solid #e2e8f0;\n"
+        "  color: #64748b;\n"
+        "  font-size: 12px;\n"
+        "  padding: 3px 10px;\n"
+        "}\n";
+
+    gtk_css_provider_load_from_data(g_cssProvider, dark ? darkCss : lightCss, -1, nullptr);
+}
+
+static void updateAppLocalization(BrowserApp* app) {
+    if (!app) return;
+    auto s = app->storage.getSettings();
+    std::string lang = s.language.empty() ? "ar" : s.language;
+    bool en = (lang == "en");
+
+    if (app->window) gtk_window_set_title(GTK_WINDOW(app->window), litebrowser::i18n::get("app_title", lang));
+    if (app->btnHome) gtk_button_set_label(GTK_BUTTON(app->btnHome), "🏠");
+    if (app->btnOpenDoc) gtk_button_set_label(GTK_BUTTON(app->btnOpenDoc), en ? "📄 Docs" : "📄 PDF/Word");
+    if (app->btnGames) gtk_button_set_label(GTK_BUTTON(app->btnGames), en ? "🎮 Games" : "🎮 ألعاب");
+    if (app->btnDownloads) gtk_button_set_label(GTK_BUTTON(app->btnDownloads), en ? "⬇ Downloads" : "⬇ التحميلات");
+    if (app->btnSettings) gtk_button_set_label(GTK_BUTTON(app->btnSettings), en ? "⚙ Settings" : "⚙ الإعدادات");
+    if (app->btnNewTab) gtk_button_set_label(GTK_BUTTON(app->btnNewTab), en ? "+ Tab" : "+ تبويب");
+    if (app->btnLiteMode) gtk_button_set_label(GTK_BUTTON(app->btnLiteMode), s.liteMode ? (en ? "⚡ Lite: ON" : "⚡ خفيف: مفعّل") : (en ? "⚡ Lite" : "⚡ وضع خفيف"));
+    if (app->btnTheme) gtk_button_set_label(GTK_BUTTON(app->btnTheme), s.isDarkMode() ? "☀️" : "🌙");
+    if (app->btnLang) gtk_button_set_label(GTK_BUTTON(app->btnLang), en ? "🌐 ع" : "🌐 En");
+    if (app->urlEntry) gtk_entry_set_placeholder_text(GTK_ENTRY(app->urlEntry), litebrowser::i18n::get("search_placeholder", lang));
+    if (app->findLbl) gtk_label_set_text(GTK_LABEL(app->findLbl), litebrowser::i18n::get("find_label", lang));
+    if (app->btnFindPrev) gtk_button_set_label(GTK_BUTTON(app->btnFindPrev), litebrowser::i18n::get("find_prev", lang));
+    if (app->btnFindNext) gtk_button_set_label(GTK_BUTTON(app->btnFindNext), litebrowser::i18n::get("find_next", lang));
+}
+
 void setStatus(BrowserApp* app, const std::string& msg) {
     if (app && app->statusLabel) {
         gtk_label_set_text(GTK_LABEL(app->statusLabel), msg.c_str());
@@ -280,6 +557,7 @@ void updateToolbarForTab(BrowserApp* app, TabContext* tab) {
     }
     bool starred = app->storage.isBookmarked(tab->logicalUrl);
     gtk_button_set_label(GTK_BUTTON(app->btnBookmark), starred ? "★" : "☆");
+    gtk_widget_set_name(app->btnBookmark, starred ? "btnBookmarkActive" : "btnBookmark");
 }
 
 void navigateTab(TabContext* tab, const std::string& rawInput);
@@ -427,6 +705,21 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
         for (auto& t : app->tabs) applyEngineSettingsToView(t->webView, s);
         setStatus(app, s.liteMode ? "تم تفعيل الوضع الخفيف لتوفير الذاكرة والمعالج" : "تم التبديل إلى الوضع الكامل");
         navigateTab(tab, tab->logicalUrl);
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-theme")) {
+        auto s = app->storage.getSettings();
+        s.theme = s.isDarkMode() ? "light" : "dark";
+        app->storage.updateSettings(s);
+        applyModernGtkCssTheme(s.theme);
+        updateAppLocalization(app);
+        setStatus(app, s.isDarkMode() ? litebrowser::i18n::get("dark_mode", s.language) : litebrowser::i18n::get("light_mode", s.language));
+        navigateTab(tab, tab->logicalUrl);
+    } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-lang")) {
+        auto s = app->storage.getSettings();
+        s.language = s.isEnglish() ? "ar" : "en";
+        app->storage.updateSettings(s);
+        updateAppLocalization(app);
+        setStatus(app, s.isEnglish() ? "Language switched to English" : "تم تغيير اللغة إلى العربية");
+        navigateTab(tab, tab->logicalUrl);
     } else if (litebrowser::fs::startsWithIgnoreCase(rest, "toggle-adblock")) {
         auto s = app->storage.getSettings();
         s.adBlockEnabled = !s.adBlockEnabled;
@@ -497,6 +790,13 @@ void handleLiteAction(TabContext* tab, const std::string& actionUri) {
             s.liteMode = (val == "1" || val == "true");
             gtk_button_set_label(GTK_BUTTON(app->btnLiteMode), s.liteMode ? "⚡ خفيف: مفعّل" : "⚡ خفيف");
             for (auto& t : app->tabs) applyEngineSettingsToView(t->webView, s);
+        } else if (key == "theme") {
+            s.theme = val;
+            applyModernGtkCssTheme(s.theme);
+            updateAppLocalization(app);
+        } else if (key == "lang" || key == "language") {
+            s.language = val;
+            updateAppLocalization(app);
         }
 
         app->storage.updateSettings(s);
@@ -543,7 +843,8 @@ void navigateTab(TabContext* tab, const std::string& rawInput) {
         int targetTabId = tab->tabId;
         std::string path = resolved.targetUrlOrPath;
         std::thread([app, targetTabId, path]() {
-            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId);
+            auto s = app->storage.getSettings();
+            auto doc = litebrowser::renderDocumentToHtml(path, targetTabId, s.theme, s.language);
             auto* data = new AsyncDocData{ app, targetTabId, std::move(doc) };
             g_idle_add([](gpointer user) -> gboolean {
                 auto* d = static_cast<AsyncDocData*>(user);
@@ -990,6 +1291,9 @@ int main(int argc, char* argv[]) {
 
     gtk_init(&argc, &argv);
 
+    BrowserApp app;
+    applyModernGtkCssTheme(app.storage.getSettings().theme);
+
     if (!g_wk.load()) {
         GtkWidget* errDlg = gtk_message_dialog_new(
             nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
@@ -1000,7 +1304,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    BrowserApp app;
     g_signal_connect(G_OBJECT(g_wk.web_context_get_default()), "download-started",
                      G_CALLBACK(onContextDownloadStarted), &app);
 
@@ -1015,6 +1318,7 @@ int main(int argc, char* argv[]) {
 
     // Top Navigation Bar
     GtkWidget* navBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_widget_set_name(navBar, "navBar");
     gtk_widget_set_margin_start(navBar, 6);
     gtk_widget_set_margin_end(navBar, 6);
     gtk_widget_set_margin_top(navBar, 6);
@@ -1022,37 +1326,52 @@ int main(int argc, char* argv[]) {
 
     app.btnBack = gtk_button_new_with_label("◀");
     app.btnForward = gtk_button_new_with_label("▶");
-    GtkWidget* btnReload = gtk_button_new_with_label("⟳");
-    GtkWidget* btnHome = gtk_button_new_with_label("🏠");
+    app.btnReload = gtk_button_new_with_label("↻");
+    app.btnHome = gtk_button_new_with_label("🏠");
     app.urlEntry = gtk_entry_new();
+    gtk_widget_set_name(app.urlEntry, "urlEntry");
     gtk_entry_set_placeholder_text(GTK_ENTRY(app.urlEntry), "ابحث في الإنترنت أو أدخل رابط موقع أو مسار ملف PDF/Word...");
 
     app.btnBookmark = gtk_button_new_with_label("☆");
-    GtkWidget* btnOpenDoc = gtk_button_new_with_label("📂 PDF/Word");
-    GtkWidget* btnGames = gtk_button_new_with_label("🎮 ألعاب");
-    GtkWidget* btnDownloads = gtk_button_new_with_label("⬇️ التحميلات");
-    GtkWidget* btnSettings = gtk_button_new_with_label("⚙️ الإعدادات");
+    gtk_widget_set_name(app.btnBookmark, "btnBookmark");
+    app.btnOpenDoc = gtk_button_new_with_label("📄 PDF/Word");
+    app.btnGames = gtk_button_new_with_label("🎮 ألعاب");
+    app.btnDownloads = gtk_button_new_with_label("⬇ التحميلات");
+    app.btnSettings = gtk_button_new_with_label("⚙ الإعدادات");
     auto initSettings = app.storage.getSettings();
-    app.btnLiteMode = gtk_button_new_with_label(initSettings.liteMode ? "⚡ خفيف: مفعّل" : "⚡ خفيف");
-    GtkWidget* btnNewTab = gtk_button_new_with_label("+ تبويب");
+    app.btnLiteMode = gtk_button_new_with_label(initSettings.liteMode ? "⚡ خفيف: مفعّل" : "⚡ وضع خفيف");
+    gtk_widget_set_name(app.btnLiteMode, "btnLiteMode");
+
+    app.btnTheme = gtk_button_new_with_label(initSettings.isDarkMode() ? "☀️" : "🌙");
+    gtk_widget_set_name(app.btnTheme, "btnTheme");
+    gtk_widget_set_tooltip_text(app.btnTheme, "تبديل المظهر داكن/فاتح - Toggle Theme");
+
+    app.btnLang = gtk_button_new_with_label(initSettings.isEnglish() ? "🌐 ع" : "🌐 En");
+    gtk_widget_set_name(app.btnLang, "btnLang");
+    gtk_widget_set_tooltip_text(app.btnLang, "تغيير اللغة - Switch Language");
+
+    app.btnNewTab = gtk_button_new_with_label("+ تبويب");
 
     gtk_box_pack_start(GTK_BOX(navBar), app.btnBack, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), app.btnForward, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnReload, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnHome, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnReload, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnHome, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), app.urlEntry, TRUE, TRUE, 4);
     gtk_box_pack_start(GTK_BOX(navBar), app.btnBookmark, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnOpenDoc, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnGames, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnDownloads, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnSettings, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnOpenDoc, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnGames, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnDownloads, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnSettings, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(navBar), app.btnLiteMode, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(navBar), btnNewTab, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnTheme, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnLang, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(navBar), app.btnNewTab, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(rootVBox), navBar, FALSE, FALSE, 0);
 
     // Bookmarks Bar (Ctrl+Shift+B)
     app.bookmarksBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(app.bookmarksBar, "bookmarksBar");
     gtk_widget_set_margin_start(app.bookmarksBar, 8);
     gtk_widget_set_margin_end(app.bookmarksBar, 8);
     gtk_widget_set_margin_bottom(app.bookmarksBar, 4);
@@ -1061,18 +1380,19 @@ int main(int argc, char* argv[]) {
 
     // Find Bar (Ctrl+F)
     app.findBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_name(app.findBar, "findBar");
     gtk_widget_set_margin_start(app.findBar, 10);
     gtk_widget_set_margin_end(app.findBar, 10);
     gtk_widget_set_margin_bottom(app.findBar, 4);
 
-    GtkWidget* findLbl = gtk_label_new("البحث في الصفحة:");
+    app.findLbl = gtk_label_new("البحث في الصفحة:");
     app.findEntry = gtk_search_entry_new();
     app.btnFindPrev = gtk_button_new_with_label("▲ السابق");
     app.btnFindNext = gtk_button_new_with_label("▼ التالي");
     app.btnFindClose = gtk_button_new_with_label("×");
     gtk_button_set_relief(GTK_BUTTON(app.btnFindClose), GTK_RELIEF_NONE);
 
-    gtk_box_pack_start(GTK_BOX(app.findBar), findLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.findBar), app.findLbl, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(app.findBar), app.findEntry, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(app.findBar), app.btnFindPrev, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(app.findBar), app.btnFindNext, FALSE, FALSE, 0);
@@ -1089,6 +1409,7 @@ int main(int argc, char* argv[]) {
 
     // Status Bar
     GtkWidget* statusBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_name(statusBox, "statusBar");
     gtk_widget_set_margin_start(statusBox, 8);
     gtk_widget_set_margin_end(statusBox, 8);
     gtk_widget_set_margin_top(statusBox, 3);
@@ -1160,7 +1481,7 @@ int main(int argc, char* argv[]) {
         if (auto* t = a->currentTab()) g_wk.web_view_go_forward(t->webView);
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnReload), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnReload), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) {
             if (litebrowser::fs::startsWithIgnoreCase(t->logicalUrl, "lite://") ||
@@ -1172,7 +1493,7 @@ int main(int argc, char* argv[]) {
         }
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnHome), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnHome), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) navigateTab(t, "lite://home");
     }), &app);
@@ -1193,21 +1514,21 @@ int main(int argc, char* argv[]) {
         }
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnOpenDoc), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnOpenDoc), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         promptOpenDocument(static_cast<BrowserApp*>(d));
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnGames), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnGames), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) navigateTab(t, "lite://games");
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnDownloads), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnDownloads), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) navigateTab(t, "lite://downloads");
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnSettings), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnSettings), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
         if (auto* t = a->currentTab()) navigateTab(t, "lite://settings");
     }), &app);
@@ -1217,9 +1538,21 @@ int main(int argc, char* argv[]) {
         if (auto* t = a->currentTab()) handleLiteAction(t, "lite-action://toggle-lite");
     }), &app);
 
-    g_signal_connect(G_OBJECT(btnNewTab), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+    g_signal_connect(G_OBJECT(app.btnTheme), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* t = a->currentTab()) handleLiteAction(t, "lite-action://toggle-theme");
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.btnLang), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
+        auto* a = static_cast<BrowserApp*>(d);
+        if (auto* t = a->currentTab()) handleLiteAction(t, "lite-action://toggle-lang");
+    }), &app);
+
+    g_signal_connect(G_OBJECT(app.btnNewTab), "clicked", G_CALLBACK(+[](GtkButton*, gpointer d) {
         createNewTab(static_cast<BrowserApp*>(d), "lite://home", true);
     }), &app);
+
+    updateAppLocalization(&app);
 
     g_signal_connect(G_OBJECT(app.notebook), "switch-page", G_CALLBACK(+[](GtkNotebook*, GtkWidget* page, guint, gpointer d) {
         auto* a = static_cast<BrowserApp*>(d);
